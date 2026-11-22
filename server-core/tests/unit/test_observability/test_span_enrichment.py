@@ -1,0 +1,719 @@
+"""Unit tests for SpanEnrichmentProcessor and set_trace_context."""
+
+import asyncio
+import contextvars
+import logging
+import uuid
+from collections.abc import Iterator
+from unittest.mock import MagicMock
+
+import pytest
+import structlog
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, get_current_span
+
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
+from aegra_api.observability.span_enrichment import (
+    RunIdAwareIdGenerator,
+    SpanEnrichmentProcessor,
+    _run_trace_id,
+    _trace_attrs,
+    make_run_trace_context,
+    merge_run_metadata,
+    prepare_run_otel_trace,
+    set_trace_context,
+)
+from aegra_api.settings import settings
+
+_RUN_ID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+_RUN_ID_2 = "bbbbbbbb-2222-3333-4444-cccccccccccc"
+
+
+@pytest.fixture
+def enable_trace_id_seeding(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER_ARG", raising=False)
+    monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
+    is_trace_id_from_run_id_enabled.cache_clear()
+    yield
+    is_trace_id_from_run_id_enabled.cache_clear()
+
+
+class TestSetTraceContext:
+    """Tests for the set_trace_context() helper."""
+
+    def setup_method(self) -> None:
+        """Reset context var before each test."""
+        _trace_attrs.set(None)
+
+    def test_sets_all_attributes_when_all_provided(self) -> None:
+        """All provided values appear in the context var under both naming schemes."""
+        set_trace_context(user_id="user-1", session_id="thread-1", trace_name="my_graph")
+
+        attrs = _trace_attrs.get()
+        assert attrs["langfuse.user.id"] == "user-1"
+        assert attrs["user.id"] == "user-1"
+        assert attrs["langfuse.session.id"] == "thread-1"
+        assert attrs["session.id"] == "thread-1"
+        assert attrs["langfuse.trace.name"] == "my_graph"
+
+    def test_skips_none_values(self) -> None:
+        """None arguments are not stored; only provided values appear."""
+        set_trace_context(user_id="user-1")
+
+        attrs = _trace_attrs.get()
+        assert "langfuse.user.id" in attrs
+        assert "user.id" in attrs
+        assert "langfuse.session.id" not in attrs
+        assert "langfuse.trace.name" not in attrs
+
+    def test_empty_call_stores_none(self) -> None:
+        """Calling with no arguments resets the context var to None (no-op state)."""
+        set_trace_context(user_id="previous")
+        set_trace_context()
+
+        assert _trace_attrs.get() is None
+
+    def test_only_trace_name_set(self) -> None:
+        """Only trace_name provided — only that key is stored."""
+        set_trace_context(trace_name="matter_agent")
+
+        attrs = _trace_attrs.get()
+        assert attrs == {"langfuse.trace.name": "matter_agent"}
+
+    def test_metadata_stored_with_langfuse_prefix(self) -> None:
+        """metadata dict keys are stored as langfuse.trace.metadata.<key>."""
+        set_trace_context(
+            user_id="u1",
+            metadata={"run_id": "run-abc", "graph_id": "matter_agent"},
+        )
+
+        attrs = _trace_attrs.get()
+        assert attrs["langfuse.trace.metadata.run_id"] == "run-abc"
+        assert attrs["langfuse.trace.metadata.graph_id"] == "matter_agent"
+        # first-class attrs still present
+        assert attrs["langfuse.user.id"] == "u1"
+
+    def test_empty_metadata_dict_ignored(self) -> None:
+        """Passing metadata={} produces no extra keys."""
+        set_trace_context(trace_name="g", metadata={})
+
+        attrs = _trace_attrs.get()
+        assert attrs == {"langfuse.trace.name": "g"}
+
+    def test_metadata_supports_non_string_values(self) -> None:
+        """metadata values may be int, float, or bool — all valid OTEL attribute types."""
+        set_trace_context(
+            metadata={"retry_count": 3, "latency_ms": 1.5, "cached": True},
+        )
+
+        attrs = _trace_attrs.get()
+        assert attrs["langfuse.trace.metadata.retry_count"] == 3
+        assert attrs["langfuse.trace.metadata.latency_ms"] == 1.5
+        assert attrs["langfuse.trace.metadata.cached"] is True
+
+    @pytest.mark.asyncio
+    async def test_context_var_isolation_between_tasks(self) -> None:
+        """Context var changes in one asyncio Task are not visible in another."""
+
+        async def task_a() -> dict[str, str]:
+            set_trace_context(user_id="user-a")
+            await asyncio.sleep(0)
+            return _trace_attrs.get()
+
+        async def task_b() -> dict[str, str]:
+            set_trace_context(user_id="user-b")
+            await asyncio.sleep(0)
+            return _trace_attrs.get()
+
+        t_a = asyncio.create_task(task_a())
+        t_b = asyncio.create_task(task_b())
+        attrs_a, attrs_b = await asyncio.gather(t_a, t_b)
+        assert attrs_a.get("user.id") == "user-a"
+        assert attrs_b.get("user.id") == "user-b"
+
+
+class TestSpanEnrichmentProcessor:
+    """Tests for SpanEnrichmentProcessor."""
+
+    def setup_method(self) -> None:
+        """Reset context var before each test."""
+        _trace_attrs.set(None)
+
+    def test_on_start_sets_span_attributes_on_root_span(self) -> None:
+        """on_start() enriches a root span (parent=None) with all context var attrs."""
+        set_trace_context(user_id="u1", session_id="s1", trace_name="graph_x")
+        processor = SpanEnrichmentProcessor()
+        mock_span = MagicMock()
+        mock_span.parent = None  # root span
+
+        processor.on_start(mock_span)
+
+        calls = {call.args[0]: call.args[1] for call in mock_span.set_attribute.call_args_list}
+        assert calls["langfuse.user.id"] == "u1"
+        assert calls["user.id"] == "u1"
+        assert calls["langfuse.session.id"] == "s1"
+        assert calls["session.id"] == "s1"
+        assert calls["langfuse.trace.name"] == "graph_x"
+
+    def test_on_start_enriches_local_child_spans(self) -> None:
+        """on_start() enriches local child spans for Langfuse v4 immutable model."""
+        set_trace_context(user_id="u1", session_id="s1", trace_name="graph_x")
+        processor = SpanEnrichmentProcessor()
+        mock_span = MagicMock()
+        mock_span.parent = MagicMock()
+        mock_span.parent.is_valid = True
+        mock_span.parent.is_remote = False  # local child span
+
+        processor.on_start(mock_span)
+
+        calls = {call.args[0]: call.args[1] for call in mock_span.set_attribute.call_args_list}
+        assert calls["langfuse.user.id"] == "u1"
+        assert calls["langfuse.session.id"] == "s1"
+        assert calls["langfuse.trace.name"] == "graph_x"
+
+    def test_on_start_enriches_span_with_remote_parent(self) -> None:
+        """on_start() enriches spans whose parent arrived via W3C traceparent.
+
+        A span with a remote parent is the local root of a distributed trace
+        and must be enriched so that Langfuse receives user/session metadata.
+        """
+        set_trace_context(user_id="u1", trace_name="graph_x")
+        processor = SpanEnrichmentProcessor()
+        mock_span = MagicMock()
+        mock_span.parent = MagicMock()
+        mock_span.parent.is_valid = True
+        mock_span.parent.is_remote = True  # arrived via traceparent header
+
+        processor.on_start(mock_span)
+
+        mock_span.set_attribute.assert_called()
+
+    def test_on_start_no_op_when_context_var_empty(self) -> None:
+        """on_start() sets no attributes when the context var holds an empty dict."""
+        processor = SpanEnrichmentProcessor()
+        mock_span = MagicMock()
+        mock_span.parent = None
+
+        processor.on_start(mock_span)
+
+        mock_span.set_attribute.assert_not_called()
+
+    def test_on_start_accepts_parent_context_argument(self) -> None:
+        """on_start() can be called with an explicit parent_context without error."""
+        set_trace_context(user_id="u2")
+        processor = SpanEnrichmentProcessor()
+        mock_span = MagicMock()
+        mock_span.parent = None
+        mock_ctx = MagicMock()
+
+        processor.on_start(mock_span, parent_context=mock_ctx)
+
+        mock_span.set_attribute.assert_called()
+
+    def test_on_end_is_no_op(self) -> None:
+        """on_end() completes without raising."""
+        processor = SpanEnrichmentProcessor()
+        processor.on_end(MagicMock())  # Should not raise
+
+    def test_force_flush_returns_true(self) -> None:
+        """force_flush() returns True unconditionally."""
+        assert SpanEnrichmentProcessor().force_flush() is True
+        assert SpanEnrichmentProcessor().force_flush(timeout_millis=100) is True
+
+    def test_shutdown_is_no_op(self) -> None:
+        """shutdown() completes without raising."""
+        SpanEnrichmentProcessor().shutdown()  # Should not raise
+
+
+@pytest.mark.usefixtures("enable_trace_id_seeding")
+class TestMakeRunTraceContext:
+    """Tests for make_run_trace_context()."""
+
+    def setup_method(self) -> None:
+        """Reset context vars before each test."""
+        _trace_attrs.set(None)
+        _run_trace_id.set(None)
+        structlog.contextvars.clear_contextvars()
+
+    def teardown_method(self) -> None:
+        _run_trace_id.set(None)
+
+    def test_returned_context_contains_expected_attributes(self) -> None:
+        """Returned context has all trace attributes pre-set."""
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert attrs["langfuse.user.id"] == "user-1"
+        assert attrs["langfuse.session.id"] == "thread-1"
+        assert attrs["langfuse.trace.name"] == "my_graph"
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+        assert attrs["langfuse.trace.metadata.thread_id"] == "thread-1"
+        assert attrs["langfuse.trace.metadata.graph_id"] == "my_graph"
+
+    def test_does_not_pollute_caller_context(self) -> None:
+        """Calling make_run_trace_context() does not mutate the caller's context."""
+        make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        assert _trace_attrs.get() is None
+        assert _run_trace_id.get() is None
+
+    def test_anonymous_user_omits_user_attributes(self) -> None:
+        """Passing user_identity=None omits user.id keys from the context."""
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", None)
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert "langfuse.user.id" not in attrs
+        assert "user.id" not in attrs
+        assert attrs["langfuse.trace.name"] == "my_graph"
+
+    def test_seeds_otel_trace_id_from_run_id(self) -> None:
+        """Returned context has a sticky OTEL trace_id seed from run_id."""
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        seeded_value = ctx.run(_run_trace_id.get)
+        assert seeded_value == uuid.UUID(_RUN_ID).int
+
+    def test_extra_metadata_merged_into_trace_context(self) -> None:
+        """User-supplied extra_metadata appears alongside system runtime keys."""
+        ctx = make_run_trace_context(
+            _RUN_ID,
+            "thread-1",
+            "my_graph",
+            "user-1",
+            extra_metadata={"tenant": "acme", "feature_flag": True},
+        )
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+        assert attrs["langfuse.trace.metadata.feature_flag"] is True
+        # System keys preserved
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+        assert attrs["langfuse.trace.metadata.thread_id"] == "thread-1"
+        assert attrs["langfuse.trace.metadata.graph_id"] == "my_graph"
+
+    def test_extra_metadata_cannot_override_system_keys(self) -> None:
+        """Reserved system keys win on collision; user value is dropped."""
+        ctx = make_run_trace_context(
+            _RUN_ID,
+            "thread-1",
+            "my_graph",
+            "user-1",
+            extra_metadata={"run_id": "run-spoofed", "tenant": "acme"},
+        )
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+        assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+
+    def test_returned_context_binds_structlog_vars(self) -> None:
+        """Returned context has structlog context vars bound for run logs."""
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert bound["run_id"] == _RUN_ID
+        assert bound["thread_id"] == "thread-1"
+        assert bound["graph_id"] == "my_graph"
+        assert bound["user_id"] == "user-1"
+
+    def test_structlog_binding_does_not_pollute_caller_context(self) -> None:
+        """Binding happens inside the returned context, not the caller's."""
+        make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        assert structlog.contextvars.get_contextvars() == {}
+
+    def test_anonymous_user_omits_structlog_user_id(self) -> None:
+        """user_identity=None omits user_id instead of binding it as None.
+
+        Mirrors the OTEL path, which skips user.id for anonymous runs, so
+        logs never carry a noisy ``user_id=None``.
+        """
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", None)
+
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert "user_id" not in bound
+        assert bound["run_id"] == _RUN_ID
+        assert bound["thread_id"] == "thread-1"
+        assert bound["graph_id"] == "my_graph"
+
+
+@pytest.mark.usefixtures("enable_trace_id_seeding")
+class TestRunIdAwareIdGenerator:
+    """Tests for deterministic trace_id seeding."""
+
+    def setup_method(self) -> None:
+        _run_trace_id.set(None)
+
+    def teardown_method(self) -> None:
+        _run_trace_id.set(None)
+
+    def test_returns_seeded_trace_id_without_consuming(self) -> None:
+        """Sticky seed: factory + graph roots both get UUID(run_id).int."""
+        gen = RunIdAwareIdGenerator()
+        _run_trace_id.set(uuid.UUID(_RUN_ID).int)
+
+        assert gen.generate_trace_id() == uuid.UUID(_RUN_ID).int
+        assert gen.generate_trace_id() == uuid.UUID(_RUN_ID).int
+        assert _run_trace_id.get() == uuid.UUID(_RUN_ID).int
+
+    def test_falls_back_to_random_when_unseeded(self) -> None:
+        gen = RunIdAwareIdGenerator()
+        first = gen.generate_trace_id()
+        second = gen.generate_trace_id()
+        assert first != trace.INVALID_TRACE_ID
+        assert second != trace.INVALID_TRACE_ID
+        assert first != second
+
+    def test_prepare_clears_ambient_parent_so_seed_is_used(self) -> None:
+        """Ambient parent must not turn the next span into a child (skipping IdGenerator)."""
+        ambient = SpanContext(
+            trace_id=0x1234567890ABCDEF1234567890ABCDEF,
+            span_id=0x1234567890ABCDEF,
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        token = otel_context.attach(trace.set_span_in_context(NonRecordingSpan(ambient)))
+        try:
+            exporter = InMemorySpanExporter()
+            provider = TracerProvider(id_generator=RunIdAwareIdGenerator())
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
+            tracer = provider.get_tracer(__name__)
+
+            prepare_run_otel_trace(_RUN_ID)
+            with tracer.start_as_current_span("run_root"):
+                pass
+
+            spans = exporter.get_finished_spans()
+            assert len(spans) == 1
+            assert spans[0].context.trace_id == uuid.UUID(_RUN_ID).int
+            assert spans[0].parent is None
+            provider.shutdown()
+        finally:
+            otel_context.detach(token)
+            _run_trace_id.set(None)
+
+
+class TestMergeRunMetadata:
+    """Tests for merge_run_metadata()."""
+
+    def test_returns_system_only_when_extra_is_none(self) -> None:
+        system = {"run_id": "r1", "thread_id": "t1"}
+        assert merge_run_metadata(None, system) == system
+
+    def test_returns_system_only_when_extra_is_empty(self) -> None:
+        system = {"run_id": "r1", "thread_id": "t1"}
+        assert merge_run_metadata({}, system) == system
+
+    def test_user_keys_added_when_no_collision(self) -> None:
+        system = {"run_id": "r1", "thread_id": "t1"}
+        result = merge_run_metadata({"tenant": "acme", "retries": 3}, system)
+        assert result == {"run_id": "r1", "thread_id": "t1", "tenant": "acme", "retries": 3}
+
+    def test_system_wins_on_collision(self) -> None:
+        system = {"run_id": "actual", "thread_id": "t1"}
+        result = merge_run_metadata({"run_id": "spoofed", "tenant": "acme"}, system)
+        assert result["run_id"] == "actual"
+        assert result["tenant"] == "acme"
+
+    def test_collision_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A user-supplied reserved key triggers a warning log."""
+        with caplog.at_level(logging.WARNING, logger="aegra_api.observability.span_enrichment"):
+            merge_run_metadata({"thread_id": "spoofed"}, {"thread_id": "actual"})
+
+        assert any("thread_id" in record.message for record in caplog.records)
+
+    def test_no_warning_when_keys_do_not_collide(self, caplog: pytest.LogCaptureFixture) -> None:
+        """No warning of any kind is emitted when user keys do not hit reserved names."""
+        with caplog.at_level(logging.WARNING, logger="aegra_api.observability.span_enrichment"):
+            merge_run_metadata({"tenant": "acme"}, {"run_id": "r1"})
+
+        # Stricter than a substring check: assert no WARNING-level record was
+        # emitted from the merge_run_metadata logger at all.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_original_request_id_passes_through_when_system_lacks_it(self) -> None:
+        """``original_request_id`` is set only on the worker path; the local-executor
+        path omits it. Reserving it would silently drop user values when the
+        system value is missing — confirm it flows through as a regular key."""
+        system = {"run_id": "r1", "thread_id": "t1", "graph_id": "g1"}
+        result = merge_run_metadata({"original_request_id": "user-corr-id"}, system)
+        assert result["original_request_id"] == "user-corr-id"
+
+    def test_non_reserved_system_collision_drops_user_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A user value that collides with a non-reserved system key is dropped
+        with a warning. Without this, the worker path silently overwrote
+        user-supplied ``original_request_id`` (and any other future system
+        injection) via ``merged.update(system_metadata)``."""
+        system = {
+            "run_id": "r1",
+            "thread_id": "t1",
+            "graph_id": "g1",
+            "original_request_id": "system-corr-id",
+        }
+        with caplog.at_level(logging.WARNING, logger="aegra_api.observability.span_enrichment"):
+            result = merge_run_metadata({"original_request_id": "user-corr-id"}, system)
+
+        assert result["original_request_id"] == "system-corr-id"
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("original_request_id" in w.message for w in warnings)
+
+    def test_non_primitive_value_is_dropped_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """OTEL span attributes accept only primitives; nested values are
+        dropped at this layer with an aegra-level warning so the loss is
+        visible (rather than swallowed inside the OTEL SDK)."""
+        system = {"run_id": "r1"}
+        with caplog.at_level(logging.WARNING, logger="aegra_api.observability.span_enrichment"):
+            result = merge_run_metadata(
+                {"tenant": "acme", "nested": {"x": 1}, "items": [1, 2, 3]},
+                system,
+            )
+
+        assert result["tenant"] == "acme"
+        assert "nested" not in result
+        assert "items" not in result
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("nested" in w.message for w in warnings)
+        assert any("items" in w.message for w in warnings)
+
+    def test_primitive_types_pass_through(self) -> None:
+        """str, int, float, bool all flow through unchanged."""
+        system: dict[str, str | int | float | bool] = {"run_id": "r1"}
+        result = merge_run_metadata(
+            {"s": "v", "i": 42, "f": 3.14, "b": True},
+            system,
+        )
+        assert result["s"] == "v"
+        assert result["i"] == 42
+        assert result["f"] == 3.14
+        assert result["b"] is True
+
+
+@pytest.mark.usefixtures("enable_trace_id_seeding")
+class TestSpanEnrichmentEndToEnd:
+    """End-to-end verification with the real OpenTelemetry SDK.
+
+    The other tests in this file mock the SDK to isolate behavior.  This
+    class wires up an actual ``TracerProvider`` with an
+    ``InMemorySpanExporter`` so the full chain
+    ``make_run_trace_context`` → context var →
+    ``SpanEnrichmentProcessor.on_start`` → root-span attributes is
+    exercised without mocks.
+
+    Without this coverage, a refactor that quietly broke any link in the
+    chain (e.g. a dropped ``extra_metadata`` kwarg, a wrongly-passed
+    ``contextvars.Context`` to ``asyncio.create_task``, an
+    ``on_start``-vs-``on_end`` ordering regression) would still pass
+    every other test in the file.
+    """
+
+    def setup_method(self) -> None:
+        _trace_attrs.set(None)
+        _run_trace_id.set(None)
+        self.exporter = InMemorySpanExporter()
+        self.provider = TracerProvider(id_generator=RunIdAwareIdGenerator())
+        # Order matters: enrichment must run BEFORE export so the
+        # exporter sees attributes set by ``on_start``.
+        self.provider.add_span_processor(SpanEnrichmentProcessor())
+        self.provider.add_span_processor(SimpleSpanProcessor(self.exporter))
+        self.tracer = self.provider.get_tracer(__name__)
+
+    def teardown_method(self) -> None:
+        self.provider.shutdown()
+        _trace_attrs.set(None)
+        _run_trace_id.set(None)
+
+    def _emit_root_span(self, ctx: contextvars.Context) -> None:
+        """Open and close a root span inside the supplied context."""
+
+        def _create() -> None:
+            with self.tracer.start_as_current_span("test_root_span"):
+                pass
+
+        ctx.run(_create)
+
+    def test_user_metadata_reaches_root_span_attributes(self) -> None:
+        """Happy path: every layer of the propagation pipeline cooperates."""
+        ctx = make_run_trace_context(
+            run_id=_RUN_ID,
+            thread_id="thread-1",
+            graph_id="my_graph",
+            user_identity="user-1",
+            extra_metadata={"tenant": "acme", "retries": 3, "ratio": 0.5, "flag": True},
+        )
+
+        self._emit_root_span(ctx)
+
+        spans = self.exporter.get_finished_spans()
+        assert len(spans) == 1
+        assert spans[0].context.trace_id == uuid.UUID(_RUN_ID).int
+        assert spans[0].parent is None
+        attrs = dict(spans[0].attributes or {})
+
+        # Langfuse-native + Phoenix/OpenInference aliases for first-class fields.
+        assert attrs["langfuse.user.id"] == "user-1"
+        assert attrs["user.id"] == "user-1"
+        assert attrs["langfuse.session.id"] == "thread-1"
+        assert attrs["session.id"] == "thread-1"
+        assert attrs["langfuse.trace.name"] == "my_graph"
+
+        # System metadata is always present.
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+        assert attrs["langfuse.trace.metadata.thread_id"] == "thread-1"
+        assert attrs["langfuse.trace.metadata.graph_id"] == "my_graph"
+
+        # User-supplied metadata flows through with primitive types preserved.
+        assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+        assert attrs["langfuse.trace.metadata.retries"] == 3
+        assert attrs["langfuse.trace.metadata.ratio"] == 0.5
+        assert attrs["langfuse.trace.metadata.flag"] is True
+
+    def test_reserved_collision_system_value_wins_on_root_span(self) -> None:
+        """User attempt to overwrite a reserved key is dropped; non-collision
+        keys still flow through.  This is the contract surfaced via the
+        warning in ``merge_run_metadata`` — verified end-to-end here."""
+        ctx = make_run_trace_context(
+            run_id=_RUN_ID_2,
+            thread_id="thread-1",
+            graph_id="my_graph",
+            user_identity="user-1",
+            extra_metadata={"run_id": "spoofed", "tenant": "acme"},
+        )
+
+        self._emit_root_span(ctx)
+
+        span = self.exporter.get_finished_spans()[0]
+        assert span.context.trace_id == uuid.UUID(_RUN_ID_2).int
+        assert span.parent is None
+        attrs = dict(span.attributes or {})
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID_2
+        assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+
+    def test_anonymous_user_with_no_extra_metadata(self) -> None:
+        """``user_identity=None`` + ``extra_metadata=None`` produces a span
+        with system metadata only and no user.id keys at all."""
+        ctx = make_run_trace_context(
+            run_id=_RUN_ID,
+            thread_id="t1",
+            graph_id="g1",
+            user_identity=None,
+            extra_metadata=None,
+        )
+
+        self._emit_root_span(ctx)
+
+        span = self.exporter.get_finished_spans()[0]
+        assert span.context.trace_id == uuid.UUID(_RUN_ID).int
+        assert span.parent is None
+        attrs = dict(span.attributes or {})
+        assert "langfuse.user.id" not in attrs
+        assert "user.id" not in attrs
+        assert attrs["langfuse.session.id"] == "t1"
+        assert attrs["langfuse.trace.name"] == "g1"
+        assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+        # No leftover metadata keys from a previous run/test.
+        user_metadata_keys = [
+            k
+            for k in attrs
+            if k.startswith("langfuse.trace.metadata.") and k.split(".")[-1] not in {"run_id", "thread_id", "graph_id"}
+        ]
+        assert user_metadata_keys == []
+
+    def test_non_primitive_user_metadata_is_dropped_before_span(self) -> None:
+        """A nested value submitted in ``extra_metadata`` is filtered by
+        ``merge_run_metadata`` and never reaches the OTEL SDK — so the
+        span carries the surviving primitive keys but not the nested
+        value (which would otherwise be silently no-op'd inside
+        ``span.set_attribute``)."""
+        ctx = make_run_trace_context(
+            run_id=_RUN_ID,
+            thread_id="t1",
+            graph_id="g1",
+            user_identity="u1",
+            extra_metadata={"tenant": "acme", "nested": {"x": 1}},
+        )
+
+        self._emit_root_span(ctx)
+
+        attrs = dict(self.exporter.get_finished_spans()[0].attributes or {})
+        assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+        assert "langfuse.trace.metadata.nested" not in attrs
+
+    def test_factory_setup_span_does_not_steal_seed_from_graph_root(self) -> None:
+        """Sequential roots in one run context keep the seeded trace_id."""
+        ctx = make_run_trace_context(_RUN_ID, "thread-1", "my_graph", "user-1")
+
+        def _factory_then_graph() -> None:
+            with self.tracer.start_as_current_span("factory_setup"):
+                pass
+            with self.tracer.start_as_current_span("graph_root"):
+                pass
+
+        ctx.run(_factory_then_graph)
+
+        spans = self.exporter.get_finished_spans()
+        assert len(spans) == 2
+        expected = uuid.UUID(_RUN_ID).int
+        assert spans[0].context.trace_id == expected
+        assert spans[1].context.trace_id == expected
+        assert spans[0].parent is None
+        assert spans[1].parent is None
+
+    def test_child_spans_receive_same_attributes_as_root(self) -> None:
+        """Child spans receive the same langfuse.* attributes as the root span.
+
+        Required for Langfuse v4 immutable model where each observation must
+        carry its own context — no server-side join from trace to children.
+        """
+        ctx = make_run_trace_context(
+            run_id=_RUN_ID,
+            thread_id="thread-1",
+            graph_id="my_graph",
+            user_identity="user-1",
+        )
+
+        def _create_parent_and_child() -> None:
+            with self.tracer.start_as_current_span("root_span"):  # noqa: SIM117
+                with self.tracer.start_as_current_span("child_span"):
+                    with self.tracer.start_as_current_span("grandchild_span"):
+                        pass
+
+        ctx.run(_create_parent_and_child)
+
+        spans = self.exporter.get_finished_spans()
+        assert len(spans) == 3
+        expected = uuid.UUID(_RUN_ID).int
+
+        for span in spans:
+            assert span.context.trace_id == expected
+            attrs = dict(span.attributes or {})
+            assert attrs["langfuse.user.id"] == "user-1"
+            assert attrs["langfuse.session.id"] == "thread-1"
+            assert attrs["langfuse.trace.name"] == "my_graph"
+            assert attrs["langfuse.trace.metadata.run_id"] == _RUN_ID
+
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_each_keep_own_seeded_trace_id(self) -> None:
+        """Two concurrent runs: each root trace_id equals its own run_id (#692)."""
+        run_a = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        run_b = "bbbbbbbb-2222-3333-4444-cccccccccccc"
+
+        async def _execute(run_id: str) -> int:
+            await asyncio.sleep(0)
+            with self.tracer.start_as_current_span(f"root-{run_id}"):
+                return get_current_span().get_span_context().trace_id
+
+        ctx_a = make_run_trace_context(run_a, "thread-1", "my_graph", "user-1")
+        ctx_b = make_run_trace_context(run_b, "thread-1", "my_graph", "user-1")
+        task_a = asyncio.create_task(_execute(run_a), context=ctx_a)
+        task_b = asyncio.create_task(_execute(run_b), context=ctx_b)
+        tid_a, tid_b = await asyncio.gather(task_a, task_b)
+
+        assert tid_a == uuid.UUID(run_a).int
+        assert tid_b == uuid.UUID(run_b).int
+        assert tid_a != tid_b

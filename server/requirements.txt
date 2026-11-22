@@ -1,0 +1,17 @@
+# The Agent Server stack — pinned to the versions verified in
+# ../agent-server-study (langgraph-api 0.18.4 / langgraph 1.2.24).
+langgraph-api==0.18.4
+langgraph-runtime-inmem==0.38.4
+langgraph-checkpoint-postgres==3.2.1
+langgraph-sdk==0.4.14
+
+# Deep agents + model providers. langchain-aws keeps inference inside
+# your AWS account via Bedrock (default in AWS); langchain-anthropic is the
+# direct-provider fallback for local development. Add others as needed.
+deepagents>=0.6,<1.0
+langchain-anthropic>=1.0
+langchain-aws>=1.0
+langchain-openai>=1.0
+
+# AES encryption at rest (LANGGRAPH_AES_KEY) — optional but wired in.
+pycryptodome>=3.20

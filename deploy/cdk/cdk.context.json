@@ -1,0 +1,19 @@
+{
+  "availability-zones:ap-south-1": [
+    "ap-south-1a",
+    "ap-south-1b",
+    "ap-south-1c"
+  ],
+  "agser:desiredCount": 2,
+  "agser:cpu": 1024,
+  "agser:memoryMiB": 4096,
+  "agser:dbInstanceClass": "burstable4.small",
+  "agser:dbMultiAz": true,
+  "agser:redisNodeType": "cache.t4g.small",
+  "agser:maxCapacity": 12,
+  "availability-zones:account=000000000000:region=ap-south-1": [
+    "ap-south-1a",
+    "ap-south-1b",
+    "ap-south-1c"
+  ]
+}

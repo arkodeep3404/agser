@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+docs/
+deploy/
+scripts/
+*.md
+.DS_Store
+node_modules
+cdk.out

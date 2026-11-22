@@ -1,0 +1,123 @@
+# Agser platform — OUR server stack.
+#
+#   server    aegra-api core + our auth/agents/config   :8123  (default)
+#   official  upstream public langgraph-api 0.18.4      :8124  (profile, parity target)
+#   fake-embed offline OpenAI-compatible embeddings for local semantic search
+#
+#   docker compose up -d --build
+#   ./scripts/verify.sh
+#   ./scripts/test-failures.sh
+#   docker compose --profile official up -d --build
+name: agser
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16   # Postgres 16 + pgvector (store semantic search)
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: pg
+      POSTGRES_DB: langgraph
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  fake-embed:
+    build:
+      context: .
+      dockerfile: examples/Dockerfile.fake-embed
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: server/aegra.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fake-embed:
+        condition: service_healthy
+    environment:
+      AEGRA_CONFIG: aegra.json
+      DATABASE_URL: postgresql://postgres:pg@postgres:5432/langgraph
+      REDIS_BROKER_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+      WORKER_COUNT: "3"
+      N_JOBS_PER_WORKER: "10"
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
+      # Choose your inference provider — nothing is hardcoded.
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
+      AGENT_MODEL: ${AGENT_MODEL:-anthropic:claude-sonnet-4-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3.5-flash-lite}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-anthropic.claude-sonnet-4-5-20250929-v1:0}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      # Store embeddings: local uses the offline fake OpenAI-compatible server;
+      # AWS can point OPENAI_BASE_URL anywhere or switch aegra.json to
+      # "bedrock:amazon.titan-embed-text-v2:0" (data stays in-account).
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://fake-embed:8010/v1}
+      SLEEPY_SECS: "${SLEEPY_SECS:-45}"
+    ports:
+      - "8123:8123"
+
+  # Upstream public build (inmem runtime) — parity comparison target only.
+  official:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    profiles: ["official"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URI: postgres://postgres:pg@postgres:5432/langgraph_official
+      REDIS_URI: redis://redis:6379
+      LANGSMITH_API_KEY: dummy
+      LANGSMITH_TRACING: "false"
+      N_JOBS_PER_WORKER: "10"
+      PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
+      LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-0123456789abcdef0123456789abcdef}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
+      AGENT_MODEL: ${AGENT_MODEL:-anthropic:claude-sonnet-4-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-google/gemini-3.5-flash-lite}
+      EMBEDDINGS_PROVIDER: ${EMBEDDINGS_PROVIDER:-fake}
+      SLEEPY_SECS: "${SLEEPY_SECS:-45}"
+    ports:
+      - "8124:8123"
+
+volumes:
+  pgdata:

@@ -1,0 +1,30 @@
+{
+  "graphs": {
+    "ping": {
+      "path": "./agents/ping/agent.py:graph",
+      "description": "No-LLM echo graph for smoke tests"
+    },
+    "research": {
+      "path": "./agents/research/agent.py:make",
+      "description": "Research deep agent (factory: per-assistant model)"
+    },
+    "complex": {
+      "path": "./agents/complex/agent.py:make",
+      "description": "Operations deep agent: planning, 3 subagents, HITL gate, structured output"
+    },
+    "approval": {
+      "path": "./agents/approval/agent.py:graph",
+      "description": "Human-in-the-loop approval gate"
+    },
+    "sleepy": {
+      "path": "./agents/sleepy/agent.py:graph",
+      "description": "Slow graph for crash-recovery tests"
+    }
+  },
+  "auth": {
+    "path": "./auth.py:platform_auth"
+  },
+  "http": {
+    "app": "./extensions/app.py:app"
+  }
+}

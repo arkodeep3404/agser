@@ -1,0 +1,11 @@
+{
+  "app": "npx tsx bin/platform.ts",
+  "context": {
+    "agser:desiredCount": 2,
+    "agser:cpu": 1024,
+    "agser:memoryMiB": 4096,
+    "agser:dbInstanceClass": "burstable4.micro",
+    "agser:dbMultiAz": false,
+    "agser:redisNodeType": "cache.t4g.micro"
+  }
+}

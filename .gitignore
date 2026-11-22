@@ -1,0 +1,15 @@
+# Compiled / deps
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+dist/
+cdk.out/
+package-lock.json
+
+# Secrets / local
+.env
+*.local
+
+# OS
+.DS_Store

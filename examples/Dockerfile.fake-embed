@@ -1,0 +1,5 @@
+# Offline fake embeddings server (OpenAI-compatible) for local semantic search.
+FROM python:3.12-slim
+COPY examples/fake_embeddings_server.py /app/server.py
+EXPOSE 8010
+CMD ["python", "/app/server.py", "8010", "1024"]
