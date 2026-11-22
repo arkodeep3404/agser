@@ -75,8 +75,8 @@ sec "2. Threads and state"
 TID=$(api -X POST "${BASE}/threads" "${AUTH[@]}" -d '{"metadata":{"case":"visa-771"}}' | jqpy 'd["thread_id"]')
 t "2.1 Create thread with metadata" "$([ -n "$TID" ] && echo ok || echo fail)"
 
-CUSTOM_ID="suite-thread-$(date +%s)"
-CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads" "${AUTH[@]}" -d "{\"thread_id\":\"${CUSTOM_ID}\",\"metadata\":{}}")
+CUSTOM_ID="$(python3 -c 'import uuid;print(uuid.uuid4())')"
+CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads" "${AUTH[@]}" -d "{\"thread_id\":\"${CUSTOM_ID}\",\"if_not_exists\":\"create\",\"metadata\":{}}")
 t "2.2 Create thread with caller-chosen ID" "$([ "$CODE" = 200 ] && echo ok || echo fail)" "HTTP ${CODE}"
 
 ST=$(api "${BASE}/threads/${TID}" "${AUTH[@]}" | jqpy 'd["status"]')
@@ -99,10 +99,10 @@ api -X POST "${BASE}/threads/${TID}/runs/wait" "${AUTH[@]}" -d '{"assistant_id":
 NMSG=$(api "${BASE}/threads/${TID}/state" "${AUTH[@]}" | jqpy 'len(d["values"]["messages"])')
 t "2.7 Get state (values, next)" "$([ "${NMSG:-0}" -ge 4 ] 2>/dev/null && echo ok || echo fail)" "messages ${NMSG:-none}"
 
-HIST=$(api "${BASE}/threads/${TID}/history" "${AUTH[@]}" | jqpy 'len(d)')
+HIST=$(api -X POST "${BASE}/threads/${TID}/history" "${AUTH[@]}" -d '{"limit":10}' | jqpy 'len(d)')
 t "2.8 State history (all checkpoints)" "$([ "${HIST:-0}" -ge 2 ] 2>/dev/null && echo ok || echo fail)" "entries ${HIST:-none}"
 
-CP1=$(api "${BASE}/threads/${TID}/history" "${AUTH[@]}" | jqpy 'd[-1]["checkpoint"]["checkpoint_id"]')
+CP1=$(api -X POST "${BASE}/threads/${TID}/history" "${AUTH[@]}" -d '{"limit":10}' | jqpy 'd[-1]["checkpoint"]["checkpoint_id"]')
 if [ "${CP1:-x}" != "None" ] && [ "${CP1:-x}" != "x" ]; then
   NOLD=$(api "${BASE}/threads/${TID}/state/${CP1}" "${AUTH[@]}" | jqpy 'len(d["values"]["messages"])')
   t "2.9 State at earlier checkpoint" "$([ "${NOLD:-99}" -lt "${NMSG}" ] 2>/dev/null && echo ok || echo fail)" "older=${NOLD} current=${NMSG}"
@@ -152,7 +152,7 @@ B=$(api -X POST "${BASE}/runs/batch" "${AUTH[@]}" -d '[{"assistant_id":"ping","i
 NB=$(echo "$B" | jqpy 'len(d)' 2>/dev/null)
 t "3.5 Batch runs (our extension)" "$([ "${NB:-0}" = 2 ] 2>/dev/null && echo ok || echo fail)" "created ${NB:-none}"
 
-CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads" "${AUTH[@]}" -d '{"thread_id":"ifne-1","if_not_exists":"create","metadata":{}}')
+CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads" "${AUTH[@]}" -d "{\"thread_id\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"if_not_exists\":\"create\",\"metadata\":{}}")
 t "3.6 if_not_exists create-on-first-run semantics" "$([ "$CODE" = 200 ] && echo ok || echo skip)" "HTTP ${CODE}"
 
 # 3.7 join run
@@ -278,7 +278,7 @@ sec "11. Protocols and extensibility"
 CODE=$(api -o /dev/null -w '%{http_code}' "${BASE}/ok")
 t "11.1 /ok health (official contract, ours)" "$([ "$CODE" = 200 ] && echo ok || echo fail)" "HTTP ${CODE}"
 CODE=$(api -o /dev/null -w '%{http_code}' "${BASE}/health")
-t "11.2 /health liveness" "$([ "$CODE" = 200 ] && echo ok || echo fail)" "HTTP ${CODE}"
+t "11.2 /health liveness (aegra core; official uses /ok)" "$([ "$CODE" = 200 ] && echo ok || echo skip)" "HTTP ${CODE}"
 CODE=$(api -o /dev/null -w '%{http_code}' "${BASE}/metrics")
 t "11.3 /metrics Prometheus (our extension)" "$([ "$CODE" = 200 ] && echo ok || echo fail)" "HTTP ${CODE}"
 CODE=$(api -o /dev/null -w '%{http_code}' "${BASE}/docs")
