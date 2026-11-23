@@ -5,8 +5,8 @@ contract as the official LangSmith Agent Server, with durable, exactly-once
 execution of long-running agent workflows.
 
 **Everything in this repository is ours to own and maintain.** The server
-core is vendored into `server-core/` (Apache-2.0, provenance in
-`server-core/NOTICE.md`) and adapted for official compatibility; we take no
+core is vendored into `server-core/` (MIT — upstream owner granted
+redistribution; provenance in `server-core/NOTICE.md`) and adapted for official compatibility; we take no
 runtime dependency on any external project that LangChain can break — the
 only framework pieces are the MIT `langgraph` engine and its Postgres
 checkpointer, used strictly as libraries.
@@ -28,7 +28,7 @@ Studio / SDK / your app
  extensions/app.py (ours: /ok, /metrics, /threads/count,
         │           /runs/batch, /threads/{id}/copy)
         ▼
- server-core/ (ours, vendored Apache-2.0 + our patches)
+ server-core/ (ours, vendored + our patches, MIT)
    ├─ FastAPI API layer, SSE streaming (v1 + v2), webhooks, crons
    ├─ Redis BLPOP job queue; workers with lease + 10s heartbeat
    ├─ lease reaper: crashed runs detected + re-enqueued (crash recovery)

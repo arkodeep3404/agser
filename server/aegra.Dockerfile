@@ -1,6 +1,6 @@
 # Agser server image — built ENTIRELY from our own repo-owned code.
 #
-#   server-core/  (in this repo, ours — Apache-2.0 vendored core + our changes)
+#   server-core/  (in this repo, ours — MIT-licensed, owner-granted)
 #   agents/      (ours)   auth.py (ours)   aegra.json (ours)
 #
 # External dependencies are pinned public libraries only: FastAPI, SQLAlchemy,
