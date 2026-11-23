@@ -118,9 +118,14 @@ docs/           architecture, runbook, feature verification vs the official
 
 ## Provenance & licensing
 
-- `server-core/`: vendored from aegra (Apache-2.0) at commit
-  `2693066413dfafce3fd21bf581f10bd2495b8dd3` with our compatibility patches;
-  license kept in `server-core/LICENSE`, modifications marked `agser (ours)`.
+- **The entire platform is MIT-licensed** (see the root `LICENSE`): all our
+  original code — agents, extensions, auth, scripts, deploy, docs, configs,
+  and every `agser (ours)` modification.
+- `server-core/`: vendored at commit `2693066413dfafce3fd21bf581f10bd2495b8dd3`
+  from the aegra project with our compatibility patches. Apache-2.0 §4
+  requires the upstream license (`server-core/LICENSE`) to remain with the
+  vendored base; our modifications on top are MIT. Full record in
+  `server-core/NOTICE.md`.
 - `langgraph`, `langgraph-checkpoint-postgres`, `langgraph-sdk`: MIT, used as
   pinned libraries.
 - Design references: the LangSmith Agent Server study (API contract),
