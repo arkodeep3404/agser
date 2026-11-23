@@ -5,7 +5,7 @@
 #
 # External dependencies are pinned public libraries only: FastAPI, SQLAlchemy,
 # langgraph engine + postgres checkpointer (MIT, library usage — never server
-# internals), Redis, Alembic. See server-core/NOTICE.md for provenance.
+# internals), Redis, Alembic. All MIT.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

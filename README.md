@@ -102,7 +102,7 @@ in this session's validation.
 ## Layout
 
 ```
-server-core/     our server core (vendored + modified — read NOTICE.md)
+server-core/     our server core (vendored + modified, MIT)
 extensions/      our official-contract extensions
 agents/          our graphs (deep agents + test graphs)
 auth.py          platform API-key auth (LangGraph SDK Auth)
