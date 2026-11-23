@@ -74,6 +74,46 @@ agents continuing this project; read after AGENTS.md.
 - Every one of these is re-runnable from the suites; nothing is trusted
   from history alone.
 
+## Third pass additions (multi-gate HITL + full emulator crash)
+
+**New instrument**: `agents/workflow/agent.py` — `intake → GATE1 → enrich →
+GATE2 → execute → GATE3 → report` with a `rejected` exit. Three sequential
+`interrupt()` gates, four `fx:<stage>:<uuid>` side-effect markers, and a
+`stage_results` channel that accumulates data which must survive crashes.
+Resume shape is `{"command":{"resume":{"approved":bool}}}`. This graph
+exists specifically to prove the hardest guarantee, not to do real work —
+treat it as the platform's crash-recovery test harness.
+
+**New suite**: `scripts/test-workflow.sh` (46 checks, W1–W8). W4 is the
+centerpiece ("crash while paused at gate 2, resume from the exact point"),
+W6 is three sequential crashes (one per gate).
+
+**Bugs this pass found (all fixed)**:
+1. **Config drift** — `workflow` was in `aegra.json`/`aegra.aws.json` but
+   missing from `langgraph.json`; the official build rejected it and 35
+   parity checks failed with "Invalid assistant". Guard added:
+   `scripts/check-config-sync.sh` (now in the gate). **Any new graph must be
+   added to all three config files.**
+2. **Message-object indexing** — `m["content"]` on `AIMessage` raises
+   `'AIMessage' object is not subscriptable`. Use the `_content()` helper.
+   This is the third time this class of bug appeared (ping, approval,
+   workflow) — always use the helper.
+3. **Weak health probe** — `wait_server` checked only `/ok`; a restarted
+   target can serve it before the ALB registers the task or before the DB
+   pool is ready. Now polls an authenticated `/threads/{id}` call, and
+   status assertions poll for the expected state.
+4. **FloCI image caching + no cold-start reconcile** — pushing `:latest`
+   does not update running tasks (use immutable tags), and after an emulator
+   restart the service needs `aws ecs update-service --desired-count N` to
+   bring tasks back. `scripts/aws-restart-tasks.sh` encodes both.
+
+**Emulator crash proof (manual, reproducible)**: workflow paused at gate 2 →
+killed all ECS tasks + `docker stop floci-sim` (platform HTTP 000) →
+restarted → thread still `interrupted` at gate 2, `side_effects` still
+exactly `[intake, enrich]`, `stage_results` intact → resumed → each
+remaining stage ran exactly once → completed. Full steps are in
+`docs/RUNBOOK.md` under "Multi-gate HITL crash drill".
+
 ## Where the next agent should start
 
 1. `AGENTS.md` §8 queued work (real-AWS deploy, LangSmith license parity

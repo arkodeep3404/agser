@@ -230,3 +230,42 @@ was re-run from scratch:
 Two audit BLOCKERs were found and fixed in this pass (CI lockfile
 gitignored; invalid RDS class in cdk.json) — the audit → fix → full
 re-run loop is the process working as designed.
+
+
+## Third verification pass — multi-gate HITL + full emulator crash
+
+Added the `workflow` graph (3 sequential approval gates, 4 instrumented
+stages) and a 46-check crash-recovery suite, then re-ran everything.
+
+| Check | Result |
+|---|---|
+| `test-workflow.sh` locally | **46/46 PASS** |
+| `test-workflow.sh` against the official build (:8124) | **46/46 PASS** |
+| `test-workflow.sh` against AWS through the ALB | **46/46 PASS** |
+| Feature conformance on AWS (through the ALB) | **62/62 PASS** (semantic-search check skipped: FloCI RDS has no pgvector) |
+| Upgrade gate (6 suites incl. config-sync + workflow) | **GREEN** |
+
+**Full emulator crash test (manual, AWS):** workflow paused at gate 2 with
+`side_effects = [intake, enrich]` and 2 `stage_results`; killed all ECS
+tasks + stopped the FloCI control plane (platform returned HTTP 000);
+restarted the emulator and nudged the reconciler. After recovery the thread
+was **still `interrupted` at gate 2**, `side_effects` still exactly
+`[intake, enrich]`, `stage_results` intact. Resumed → `execute` ran once →
+gate 3 → `report` ran once → completed. **Every stage exactly once across a
+complete environment outage.**
+
+Bugs found and fixed during this pass:
+1. `workflow` was registered in `aegra.json`/`aegra.aws.json` but **not**
+   `langgraph.json` → the official build rejected it ("Invalid assistant")
+   and 35 parity checks failed. Added `scripts/check-config-sync.sh` to the
+   gate so config drift can never recur silently.
+2. The workflow graph indexed message objects (`m["content"]`) → three
+   `'AIMessage' object is not subscriptable` failures, fixed with the
+   `_content()` helper.
+3. The suite's `wait_server` only probed `/ok`, which a restarted target can
+   serve before the ALB registers it → switched to polling a real
+   authenticated `/threads/{id}` call, and status assertions now poll for
+   the expected state instead of sampling once.
+4. FloCI serves cached images by reference and does not auto-reconcile after
+   a cold restart → documented immutable-tag deploys + the
+   `aws-restart-tasks.sh` crash hook.

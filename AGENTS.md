@@ -41,6 +41,7 @@ including killing ECS tasks mid-run.
 
 Also verified separately (not in the gate):
 - **AWS kill-task**: `aws ecs stop-task` mid-run on FloCI → ECS replacement + reaper + checkpoint resume → prep exactly once (log trail in session history).
+- **AWS FULL EMULATOR CRASH (hardest proof)**: multi-gate workflow paused at gate 2 (intake+enrich done) → killed all ECS tasks **and** stopped the FloCI control plane (platform unreachable, HTTP 000) → restarted → thread still `interrupted` at gate 2, `side_effects` still exactly `[intake, enrich]`, 2 `stage_results` preserved → resumed → `execute` ran once → gate 3 → `report` ran once → completed. **Every stage exactly once across a full environment outage.** Then the whole 46-check suite ran green through the ALB (`RESTART_CMD=./scripts/aws-restart-tasks.sh`), and the 62-check feature suite green too.
 - **AES encryption at rest**: new `checkpoint_writes.blob` rows carry the `AGSER-AESGCM1` magic; `SELECT count(*) FROM checkpoints WHERE checkpoint::text LIKE '%pong%'` = 0.
 - **Webhook HMAC**: e2e with signature-verifying receiver → `X-Agser-Signature: sha256=…` VALID.
 - **MCP**: `POST /mcp` initialize/tools/list (5 tools)/tools/call executed a graph.
@@ -77,6 +78,8 @@ agents/                 ← ping, research, complex (deep agents), approval, sle
 extensions/app.py       ← OUR endpoints: /ok /metrics /threads/count /runs/batch
                           /threads/{id}/copy /mcp /a2a/{id} agent-card + CW publisher
 scripts/                ← verify, test-features, test-hitl, test-failures,
+                          test-workflow (46-check multi-gate crash suite),
+                          check-config-sync, aws-restart-tasks (crash hook),
                           upgrade-check, deploy-image, local-up/down (+logs)
 deploy/cdk/             ← AWS infra (PlatformStack) + optional CicdStack (agser:cicd)
 deploy/cicd/            ← CodeBuild buildspec + CodePipeline README
@@ -147,7 +150,9 @@ Langfuse ClickHouse was remapped to 18123 because 8123 is ours).
    the licensed production image for the final side-by-side.
 3. Minor: full MCP elicitation for interrupts (currently surfaces thread id
    for API resume); v2 thread-stream e2e client test; webhook secret
-   rotation helper; `after_seconds` delayed runs (inventory §3).
+   rotation helper; `after_seconds` delayed runs (inventory §3); re-add
+   `store.index` to `aegra.aws.json` when deploying to real RDS (pgvector
+   exists there; it is absent on FloCI, hence the current omission).
 4. Optional: CDK dashboard for the custom metrics; RDS Proxy for pool
    limits at high replica counts.
 
@@ -176,3 +181,22 @@ Langfuse ClickHouse was remapped to 18123 because 8123 is ours).
   credential fails one run, never server boot.
 - **Langfuse v4 is events_only**: legacy `GET /api/public/traces` is gone;
   verify ingestion via ClickHouse (`events_core`) or the UI.
+- **Config drift between the three config files** silently breaks one target
+  (a graph missing from `langgraph.json` → official build returns "Invalid
+  assistant" and 35 parity checks fail). `check-config-sync.sh` now guards
+  this — run it after touching any config.
+- **FloCI caches images by reference**: pushing a new `:latest` does NOT
+  update running tasks. Use an **immutable tag** and redeploy with
+  `-c agser:imageUri=localhost:5100/<repo>:<tag>`. Also, FloCI's reconciler
+  does not restart tasks after a cold emulator restart — nudge it with
+  `aws ecs update-service --desired-count N` (real ECS does this itself).
+- **Never `docker restart` ECS tasks on FloCI**: bypassing the ECS API
+  leaves the service with no running tasks. Use `scripts/aws-restart-tasks.sh`
+  (stop-task + reconcile nudge) as the crash hook.
+- **`wait_server` must check an authenticated call**, not just `/ok`: a
+  restarted target can serve `/ok` before the ALB registers it or before its
+  DB pool is ready. The workflow suite polls a real `/threads/{id}` now.
+- **Message objects vs dicts**: langgraph passes `HumanMessage`/`AIMessage`
+  objects, not dicts. `state["messages"][-1]["content"]` raises
+  `'AIMessage' object is not subscriptable`. Always use the `_content()`
+  helper pattern (`agents/ping`, `agents/approval`, `agents/workflow`).

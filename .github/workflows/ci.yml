@@ -28,6 +28,12 @@ jobs:
       - name: Platform conformance (verify.sh, LLM-free)
         run: RUN_LLM_DEEP_AGENT=0 ./scripts/verify.sh
 
+      - name: Config sync (graph registry parity across configs)
+        run: ./scripts/check-config-sync.sh
+
+      - name: Multi-gate HITL crash-recovery (test-workflow.sh)
+        run: ./scripts/test-workflow.sh
+
       - name: Official-contract feature conformance (test-features.sh)
         run: ./scripts/test-features.sh
 

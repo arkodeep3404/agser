@@ -62,6 +62,12 @@ target-tracking + requests-per-target + backlog step-scaling
 - Workers heartbeat; a **lease reaper** sweeps for runs whose heartbeat
   lapsed (crashed/killed instance), re-enqueues them; any live worker
   claims, resumes from the last checkpoint.
+- **How it is proven** (three layers): (a) `approval`/`sleepy` stamp
+  `prep:<uuid>` per execution; (b) `workflow` stamps `fx:<stage>:<uuid>`
+  across three sequential HITL gates and four stages, so recovery can be
+  verified *per gate*; (c) the suites assert count==1 for every marker
+  across crash / restart / full-emulator-outage cycles. `complex` proves the
+  same for LLM tool calls via unique `tool_call_id`s.
 - Guaranteed effect: each completed super-step runs **exactly once**
   across any number of crashes/restarts. A step in flight at crash time
   re-runs from its start — business tools must be idempotent per step
@@ -113,6 +119,8 @@ Langfuse tracing entirely in-account → ALB CIDR-restriction + HTTPS.
 
 1. New REST surface → `extensions/app.py` (+ auth_registry entries) —
    e.g. full MCP elicitation.
+1b. Any new graph → register in **all three** configs (`aegra.json`,
+   `aegra.aws.json`, `langgraph.json`); `check-config-sync.sh` enforces it.
 2. Core behavior changes → `server-core/` patch, marked `agser (ours)`,
    gate must stay green on BOTH servers.
 3. New agents → `agents/` + both configs (aegra.json, aegra.aws.json).

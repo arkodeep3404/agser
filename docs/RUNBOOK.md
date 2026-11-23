@@ -58,6 +58,30 @@ aws ecs update-service --cluster agser --service <ServiceName> --force-new-deplo
 Emulator-only context flags: `dbPassword`, `imageUri`, `redisUri` — never
 set them for real AWS.
 
+### Multi-gate HITL crash drill (the hardest guarantee)
+The `workflow` graph pauses at three sequential approval gates. To prove
+"recover from the exact point where the human was called":
+
+```bash
+# local
+./scripts/test-workflow.sh
+
+# against AWS through the ALB (uses the ECS-API crash hook)
+ALB=$(aws elbv2 describe-load-balancers --query 'LoadBalancers[0].DNSName' --output text)
+KEY=$(aws secretsmanager get-secret-value --secret-id agser/platform-api-key --query SecretString --output text)
+BASE="http://$ALB" PLATFORM_API_KEY="$KEY" API_TIMEOUT=150 \
+  RESTART_CMD=./scripts/aws-restart-tasks.sh ./scripts/test-workflow.sh
+```
+
+Manual version: start the workflow, approve gate 1 (now paused at gate 2),
+then crash everything — `docker rm -f $(docker ps -q --filter name=floci-ecs)`
+plus `docker stop floci-sim` — verify the platform is unreachable, restart
+`floci-sim`, nudge the reconciler with
+`aws ecs update-service --cluster agser --service <svc> --desired-count 2`,
+then read the thread: status must still be `interrupted`, `side_effects`
+must still be exactly `[intake, enrich]`, `stage_results` intact. Resume →
+`execute` runs once → gate 3 → `report` runs once.
+
 ### Chaos drill on the emulator (the flagship test)
 ```bash
 # start a sleepy run via the ALB, wait 12s (prep checkpointed),
@@ -101,6 +125,15 @@ BLPOP workers steal the other's `aegra:jobs` entries and can't claim them
 (compose /0, FloCI ECS /1) — and kill **orphan ECS task containers** left
 by FloCI stack destroys (`docker ps | grep floci-ecs`; verify each one's
 `REDIS_URL` db matches the CURRENT deploy).
+
+### ECS tasks run a stale image after you push `:latest`
+FloCI caches images by reference. Push an **immutable tag** and redeploy
+with `-c agser:imageUri=localhost:5100/<repo>:<tag>`; then confirm inside a
+task: `docker exec <task> python3 -c "import json;print(json.load(open('aegra.aws.json'))['graphs'])"`.
+
+### ECS tasks do not come back after an emulator restart
+FloCI's reconciler is not automatic on cold start (real ECS is). Nudge it:
+`aws ecs update-service --cluster agser --service <svc> --desired-count 2`.
 
 ### ECS task crash-loops on boot
 Read `docker logs <task-container>`: past causes were (a) alembic

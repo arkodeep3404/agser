@@ -122,6 +122,7 @@ create their own threads per call (stateless semantics).
 | `research` | deep agent, factory | tools: catalog lookup; subagent: researcher |
 | `complex` | the showcase deep agent, factory | planning, 3 subagents (researcher/analyst/writer), `SummarizationMiddleware(model=model)` (positional `model` arg is REQUIRED in this langchain version), `interrupt_on={"format_report": True}` HITL gate, `response_format=Report` (pydantic) |
 | `approval` | deterministic HITL graph | `prep` (side-effect counter → `side_effects` state) → `gate` (`interrupt()`) → `finish`; the exactly-once proof instrument |
+| `workflow` | **multi-gate HITL pipeline** (the flagship crash-recovery instrument) | `intake → GATE1 → enrich → GATE2 → execute → GATE3 → report`, plus a `rejected` exit node. Each stage stamps `fx:<stage>:<uuid>` into `side_effects`; each gate is a `interrupt()`; `stage_results` accumulates structured data that must survive crashes. Resume: `{"command":{"resume":{"approved":true|false}}}`. Reject at any gate routes to `rejected` (later stages never run). Covered by `test-workflow.sh` (46 checks) |
 | `sleepy` | slow graph for crash tests | `prep` + `sleep(SLEEPY_SECS)`; failure suite F1/F2/F4 depend on it |
 | `embeddings.py` | `get_embeddings()` factory | `EMBEDDINGS_PROVIDER`: fake (hashed, offline) / openai / bedrock; all 1024-dim to match config |
 
@@ -153,9 +154,24 @@ exit on any FAIL.
 - **test-failures.sh** — F1 server-kill (via `RESTART_CMD`), F2 client
   drop + rejoin, F3 cancel-not-wedged, F4 4-parallel — all assert prep
   count exactly 1. Tolerates server-down windows (`?` placeholders).
+- **test-workflow.sh** — the multi-gate crash-recovery suite (46 checks,
+  W1–W8). Runs against any target; the crash hook is `RESTART_CMD`:
+  local = `docker compose restart server`, official = `... official`,
+  AWS = `./scripts/aws-restart-tasks.sh`. Env: `BASE`,
+  `PLATFORM_API_KEY`, `API_TIMEOUT` (raise to 150 on AWS). W4 is the
+  centerpiece: approve gate 1, crash while paused at gate 2, restart,
+  assert the thread is still at gate 2 with `side_effects == [intake,
+  enrich]` and `stage_results` intact, then resume and assert every stage
+  ran exactly once. W6 does three sequential crashes, one per gate.
+- **check-config-sync.sh** — asserts `aegra.json`, `aegra.aws.json` and
+  `langgraph.json` register the same graph set (a drift here silently
+  breaks one target — it caused a 35-check parity failure once).
+- **aws-restart-tasks.sh** — the AWS crash hook: stops all tasks via the
+  ECS API and nudges the reconciler (never `docker restart`).
 - **upgrade-check.sh** — the gate: rebuild (`docker compose build server`)
-  → force-recreate → wait for `/ok` → run the four suites. `--no-rebuild`
-  to gate an already-running server.
+  → force-recreate → reconcile the whole stack → wait for `/ok` → run
+  config-sync + verify + features + failures + HITL + workflow.
+  `--no-rebuild` to gate an already-running server.
 
 ## 7. AWS infra (deploy/cdk/)
 
@@ -197,9 +213,11 @@ For real AWS, omit these three.
    conventional, explains why).
 2. New endpoint: add to `extensions/app.py` + auth_registry map/paths;
    cover in `test-features.sh`; document here.
-3. New agent: directory under `agents/`, register in BOTH aegra.json and
-   aegra.aws.json (keep entries in sync), add tooling tests to the suites
-   if it carries platform guarantees.
+3. New agent: directory under `agents/`, register in **ALL THREE** configs
+   (`aegra.json`, `aegra.aws.json`, `langgraph.json`) — `check-config-sync.sh`
+   enforces this and is part of the gate. Add tooling tests to the suites if
+   it carries platform guarantees. If it has HITL gates, extend
+   `test-workflow.sh`.
 4. Upgrading server-core from upstream: re-vendor at a new commit, re-apply
    every `agser (ours)` patch (AGENTS §5 table), run the gate. The
    `official` profile must also stay green.

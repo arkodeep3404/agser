@@ -19,6 +19,10 @@
     "sleepy": {
       "path": "./agents/sleepy/agent.py:graph",
       "description": "Slow graph for crash-recovery tests"
+    },
+    "workflow": {
+      "path": "./agents/workflow/agent.py:graph",
+      "description": "Multi-gate HITL workflow: 3 approval gates, 3 side-effect stages, crash-recovery instrumented"
     }
   },
   "auth": {

@@ -4,7 +4,8 @@
     "research": "./agents/research/agent.py:make",
     "complex": "./agents/complex/agent.py:make",
     "approval": "./agents/approval/agent.py:graph",
-    "sleepy": "./agents/sleepy/agent.py:graph"
+    "sleepy": "./agents/sleepy/agent.py:graph",
+    "workflow": "./agents/workflow/agent.py:graph"
   },
   "auth": {
     "path": "./auth.py:platform_auth"
@@ -13,7 +14,9 @@
     "index": {
       "embed": "./agents/embeddings.py:get_embeddings",
       "dims": 1024,
-      "fields": ["$"]
+      "fields": [
+        "$"
+      ]
     }
   }
 }
