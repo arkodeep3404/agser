@@ -21,7 +21,9 @@ RUN pip install --no-cache-dir ./server-core \
     'deepagents>=0.6,<1.0' \
     'langchain-anthropic>=1.0' \
     'langchain-aws>=1.0' \
-    'langchain-openai>=1.0'
+    'langchain-openai>=1.0' \
+    'cryptography>=42' \
+    'boto3>=1.34'
 
 COPY aegra.json aegra.aws.json auth.py ./
 COPY agents/ ./agents/

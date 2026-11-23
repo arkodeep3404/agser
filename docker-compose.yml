@@ -72,6 +72,12 @@ services:
       N_JOBS_PER_WORKER: "10"
       RUN_MIGRATIONS_ON_STARTUP: "true"
       PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
+      # AES-256-GCM checkpoint encryption at rest (official contract).
+      LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-0123456789abcdef0123456789abcdef}
+      AGSER_WEBHOOK_SECRET: ${AGSER_WEBHOOK_SECRET:-test-webhook-secret}
+      # OTEL tracing to any OTLP endpoint (Langfuse/Phoenix) — off by default:
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse:3000/api/public/otel
+      # OTEL_SERVICE_NAME: agser-platform
       # Choose your inference provider — nothing is hardcoded.
       MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
       AGENT_MODEL: ${AGENT_MODEL:-anthropic:claude-sonnet-4-5}
@@ -109,6 +115,10 @@ services:
       N_JOBS_PER_WORKER: "10"
       PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
       LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-0123456789abcdef0123456789abcdef}
+      AGSER_WEBHOOK_SECRET: ${AGSER_WEBHOOK_SECRET:-test-webhook-secret}
+      # OTEL tracing to any OTLP endpoint (Langfuse/Phoenix) — off by default:
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse:3000/api/public/otel
+      # OTEL_SERVICE_NAME: agser-platform
       MODEL_PROVIDER: ${MODEL_PROVIDER:-openrouter}
       AGENT_MODEL: ${AGENT_MODEL:-anthropic:claude-sonnet-4-5}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

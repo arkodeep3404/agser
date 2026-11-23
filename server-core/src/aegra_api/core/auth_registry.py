@@ -76,6 +76,10 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("POST", "/threads/count"): ("threads", "search"),
     ("POST", "/runs/batch"): ("runs", "create"),
     ("POST", "/threads/{thread_id}/copy"): ("threads", "create"),
+    # agser (ours): MCP + A2A protocol endpoints (extensions/app.py)
+    ("POST", "/mcp"): ("assistants", "read"),
+    ("GET", "/.well-known/agent-card.json"): ("assistants", "read"),
+    ("POST", "/a2a/{assistant_id}"): ("assistants", "read"),
     ("POST", "/threads/{thread_id}/runs/crons"): ("crons", "create"),
     ("GET", "/runs/crons/{cron_id}"): ("crons", "read"),
     ("PATCH", "/runs/crons/{cron_id}"): ("crons", "update"),

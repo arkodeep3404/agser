@@ -35,5 +35,14 @@
         "$"
       ]
     }
+  },
+  "webhooks": {
+    "url": {
+      "allowed_domains": [
+        "host.docker.internal"
+      ],
+      "disable_loopback": false,
+      "require_https": false
+    }
   }
 }

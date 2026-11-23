@@ -70,6 +70,8 @@ export class PlatformStack extends cdk.Stack {
     // Emulator override for the Redis URI (FloCI's ElastiCache is limited);
     // default builds it from the replication group endpoint (real AWS).
     const redisOverride = ctx('redisUri', '') as string;
+    // OTLP trace export endpoint (Langfuse/Phoenix), or unset for off.
+    const otelEndpoint = ctx('otelEndpoint', '') as string;
 
     // ---------------------------------------------------------------- VPC
     // One NAT per AZ: outbound traffic (model calls) survives an AZ failure.
@@ -232,6 +234,8 @@ export class PlatformStack extends cdk.Stack {
             actions: [
               'bedrock:InvokeModel',
               'bedrock:InvokeModelWithResponseStream',
+              // agser (ours): backlog-metrics publisher (extensions/app.py)
+              'cloudwatch:PutMetricData',
             ],
             resources: [
               'arn:aws:bedrock:*::foundation-model/*',
@@ -298,6 +302,19 @@ export class PlatformStack extends cdk.Stack {
         BEDROCK_MODEL_ID: bedrockModelId,
         AWS_REGION: this.region,
         SLEEPY_SECS: '45',
+        // agser (ours): publish PendingRuns/RunningRuns to CloudWatch every
+        // 60s; consumed by the step-scaling policy below (PDF §8 backlog
+        // autoscaling). No-op locally (namespace unset).
+        AGSER_CW_NAMESPACE: 'AgserPlatform',
+        // OTEL tracing to any OTLP endpoint (Langfuse/Phoenix/etc.); off by
+        // default — enable with context agser:otelEndpoint. Traces NEVER go
+        // to LangSmith.
+        ...(otelEndpoint
+          ? {
+              OTEL_EXPORTER_OTLP_ENDPOINT: otelEndpoint,
+              OTEL_SERVICE_NAME: 'agser-platform',
+            }
+          : {}),
       },
       secrets: {
         ...(dbPassword
@@ -375,6 +392,22 @@ export class PlatformStack extends cdk.Stack {
       targetUtilizationPercent: 60,
       scaleInCooldown: cdk.Duration.minutes(3),
       scaleOutCooldown: cdk.Duration.minutes(1),
+    });
+    // agser (ours): backlog autoscaling — step-scale on pending runs
+    // (published by extensions/app.py to the AgserPlatform namespace).
+    // Whichever policy needs more replicas wins (PDF §8).
+    scaling.scaleOnMetric('BacklogScaling', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AgserPlatform',
+        metricName: 'PendingRuns',
+        statistic: 'Average',
+        period: cdk.Duration.minutes(1),
+      }),
+      scalingSteps: [
+        { change: +2, lower: 15 },   // >15 pending → add 2 tasks
+        { change: +1, lower: 5 },    // >5 pending  → add 1 task
+        { change: -1, upper: 1 },    // ≤1 pending  → remove 1 task
+      ],
     });
 
     // ---------------------------------------------------------------- Alarms

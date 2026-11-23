@@ -49,6 +49,7 @@ FAILED=0
 run_suite "verify" ./scripts/verify.sh || FAILED=1
 run_suite "feature conformance" ./scripts/test-features.sh || FAILED=1
 run_suite "failure injection" ./scripts/test-failures.sh || FAILED=1
+run_suite "human-in-the-loop lifecycle" ./scripts/test-hitl.sh || FAILED=1
 
 printf '\n%s== UPGRADE GATE: %s ==%s\n' "$BOLD" "$([ $FAILED = 0 ] && echo GREEN || echo BLOCKED)" "$OFF"
 for r in "${RESULTS[@]}"; do printf '  %s\n' "$r"; done

@@ -84,7 +84,21 @@ class DatabaseManager:
 
         logger.info(f"Initializing LangGraph components with shared pool (max {lg_max} conns)...")
 
-        self._checkpointer = AsyncPostgresSaver(conn=self.lg_pool)
+        # agser (ours): AES-256-GCM checkpoint encryption at rest — the
+        # official LANGGRAPH_AES_KEY contract (see security/encryption.py).
+        import os
+
+        serde = None
+        _aes_secret = os.environ.get("LANGGRAPH_AES_KEY") or os.environ.get(
+            "AGSER_AES_KEY"
+        )
+        if _aes_secret:
+            from aegra_api.security.encryption import maybe_encrypted_serde
+
+            serde = maybe_encrypted_serde(_aes_secret)
+            logger.info("Checkpoint AES-256-GCM encryption ENABLED")
+
+        self._checkpointer = AsyncPostgresSaver(conn=self.lg_pool, serde=serde)
         await self._checkpointer.setup()  # Ensure tables exist
 
         # Load store configuration for semantic search (if configured)
