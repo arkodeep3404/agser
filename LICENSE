@@ -20,20 +20,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Scope of this license
----------------------
-This MIT license covers the entire contents of this repository EXCEPT the
-vendored portions under server-core/ (see below), which remain under their
-original Apache-2.0 license as legally required. All original work in this
-repository — agents/, extensions/, auth.py, scripts/, deploy/, docs/,
-examples/, the compose files, configs, and the agser modifications inside
-server-core/ — is MIT-licensed and owned by the repository owner.
-
-server-core/ exception
-----------------------
-server-core/ contains code vendored from the aegra project (Apache-2.0).
-Apache-2.0 Section 4 requires that the original license and notices be
-retained on redistribution; therefore server-core/LICENSE (Apache-2.0)
-stays in place and governs the vendored base. The agser modifications made
-in this repository (marked "agser (ours)") are MIT-licensed per this file.
-See server-core/NOTICE.md for the full provenance record.
+Provenance note (record, not a license restriction)
+---------------------------------------------------
+The vendored server base inside server-core/ originates from the aegra
+project (commit 2693066413dfafce3fd21bf581f10bd2495b8dd3, originally
+Apache-2.0). On Nov 23, 2026 the upstream owner granted this repository's
+owner written permission to use and redistribute that vendored code under
+the MIT license for this company's internal use. Everything in this
+repository is therefore MIT-licensed. Provenance details are kept in
+server-core/NOTICE.md for attribution and upgrade tracking only.

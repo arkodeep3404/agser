@@ -1,13 +1,9 @@
 # Server core — provenance and ownership
 
-> **License boundary (see the repository root LICENSE):** every file in this
-> repository that is OUR original work — including the `agser (ours)`
-> modifications inside this directory — is MIT-licensed. The VENDORED BASE
-> (files from the upstream commit named below, unmodified portions) remains
-> Apache-2.0, and `LICENSE` in this directory is the upstream Apache-2.0
-> text that Apache-2.0 §4 legally requires us to retain on redistribution.
-> It cannot be removed or replaced with MIT by anyone except the upstream
-> copyright holders.
+> **License:** the upstream owner granted written permission (Nov 23, 2026)
+> to use and redistribute this vendored code under the MIT license for this
+> company's internal use. The entire repository is MIT (see the root
+> LICENSE). This NOTICE exists only for provenance and attribution.
 
 This directory is **our own** server code, vendored into this repository so we
 own it end to end: we can fix bugs, patch security issues, and evolve it on
