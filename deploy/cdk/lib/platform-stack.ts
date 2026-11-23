@@ -44,6 +44,13 @@ export interface PlatformStackProps extends cdk.StackProps {
  *                     AGENT_MODEL + its API key secret. Not hardcoded.
  */
 export class PlatformStack extends cdk.Stack {
+  /** ECR repository the server image is pushed to (deploy-image.sh / CI/CD). */
+  readonly repository: ecr.Repository;
+  /** ECS cluster — passed to the optional CicdStack as ecs.ICluster. */
+  readonly cluster: ecs.Cluster;
+  /** ECS service — passed to the optional CicdStack as ecs.IBaseService. */
+  readonly service: ecs.FargateService;
+
   constructor(scope: Construct, id: string, props: PlatformStackProps) {
     super(scope, id, props);
 
@@ -86,6 +93,7 @@ export class PlatformStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       imageScanOnPush: true,
     });
+    this.repository = repo;
 
     // ---------------------------------------------------------------- Secrets
     const platformApiKey = new secretsmanager.Secret(this, 'PlatformApiKey', {
@@ -210,6 +218,7 @@ export class PlatformStack extends cdk.Stack {
       clusterName: 'agser',
       containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
+    this.cluster = cluster;
 
     const serverSg = new ec2.SecurityGroup(this, 'ServerSg', {
       vpc,
@@ -348,6 +357,7 @@ export class PlatformStack extends cdk.Stack {
       maxHealthyPercent: 200,
       circuitBreaker: { rollback: true },
     });
+    this.service = service;
 
     const targetGroup = targetListener.addTargets('ServerTarget', {
       port: 8123,

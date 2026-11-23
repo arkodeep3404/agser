@@ -182,15 +182,21 @@ Sandbox backend (v2): not built.
 6. **GitHub Actions CI (§12) — DONE.** `.github/workflows/ci.yml`: build,
    all four suites locally, the parity suites against the official build,
    and `cdk synth` template validation.
-7. **OTLP tracing wiring (§13) — DONE.** Core ships OpenTelemetry +
-   openinference instrumentation; wired via
-   `OTEL_EXPORTER_OTLP_ENDPOINT` (compose env + CDK context
-   `agser:otelEndpoint`), `OTEL_SERVICE_NAME`. Off by default; LangSmith
-   tracing permanently off (privacy).
+7. **OTLP tracing wiring (§13) — DONE + VERIFIED with Langfuse.** The
+   core's native Langfuse target (`OTEL_TARGETS=LANGFUSE` + keys) exports
+   OTLP to the official ingestion endpoint. Verified end-to-end against
+   self-hosted Langfuse v4.83.0: a deep-agent run landed 295 events
+   (AGENT/CHAIN/TOOL/GENERATION spans, model calls captured). AWS path:
+   official Langfuse Terraform module + four env vars on the task def
+   (deploy/langfuse/README.md). LangSmith tracing permanently off.
 
 ## Remaining (explicitly out of scope per owner decision)
 - Multi-tenant key→identity auth + two-tenant isolation (§10) — not needed;
   single-company internal use.
+- AWS-native CI/CD: **DONE** — CodePipeline (CodeStar GitHub source →
+  CodeBuild running all four suites + ARM64 image build/push → ECS rolling
+  deploy), `deploy/cicd/`, enabled with `agser:cicd` context; complements
+  the GitHub Actions workflow.
 - Full MCP elicitation for interrupts, thread-scoped v2 stream end-to-end
   client test, webhook signing secrets rotation — minor follow-ups.
 - Live-fire autoscaling/HA verification on real AWS (Mumbai) once AWS

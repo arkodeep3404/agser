@@ -1,0 +1,63 @@
+# AWS CodeBuild buildspec for the optional Agser CI/CD pipeline
+# (deploy/cdk/lib/cicd-stack.ts). Runs on a PRIVILEGED (Docker-in-Docker)
+# CodeBuild host.
+#
+# Env vars supplied by the CodeBuild project definition (CicdStack):
+#   ECR_REPO_URI  - full URI of the PlatformStack ECR repository
+#   AWS_REGION    - deployment region
+# CODEBUILD_RESOLVED_SOURCE_VERSION is provided by CodeBuild (the commit SHA
+# that triggered the pipeline).
+version: 0.2
+
+phases:
+  install:
+    commands:
+      # The PlatformStack ECS tasks run on ARM64 (Graviton); CodeBuild x86
+      # hosts need the QEMU binfmt handlers registered (host-level, idempotent,
+      # a few seconds) to cross-build a linux/arm64 image. Without this the
+      # pushed image would be amd64-only and the ARM64 Fargate tasks would
+      # fail to start it ("exec format error") after a green pipeline.
+      - docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+  pre_build:
+    commands:
+      - echo "Building server image for $CODEBUILD_RESOLVED_SOURCE_VERSION started on $(date)"
+      # linux/arm64 matches the Fargate runtimePlatform in platform-stack.ts.
+      - docker build --platform linux/arm64 -f server/aegra.Dockerfile -t "agser-server:$CODEBUILD_RESOLVED_SOURCE_VERSION" .
+      - echo "Logging in to Amazon ECR"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REPO_URI"
+      - docker tag "agser-server:$CODEBUILD_RESOLVED_SOURCE_VERSION" "$ECR_REPO_URI:$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - docker push "$ECR_REPO_URI:$CODEBUILD_RESOLVED_SOURCE_VERSION"
+
+  build:
+    commands:
+      - echo "Starting local compose stack on $(date)"
+      - cp .env.example .env
+      - docker compose up -d --build
+      - |
+        echo "Waiting for http://127.0.0.1:8123/ok"
+        for i in $(seq 1 60); do
+          if curl -sf -m 3 http://127.0.0.1:8123/ok > /dev/null; then
+            echo "platform healthy after ${i} checks"
+            break
+          fi
+          if [ "$i" = "60" ]; then
+            echo "platform never became healthy"
+            docker compose ps
+            docker compose logs --tail 100 server
+            exit 1
+          fi
+          sleep 5
+        done
+      - ./scripts/verify.sh
+      - ./scripts/test-features.sh
+      - RUN_LLM=0 ./scripts/test-hitl.sh
+      - ./scripts/test-failures.sh
+
+  post_build:
+    commands:
+      - echo "Writing imagedefinitions.json on $(date)"
+      # Consumed by the EcsDeployAction. "name" MUST match the container name
+      # in the ECS task definition (taskDef.addContainer('server', ...) in
+      # platform-stack.ts).
+      - printf '[{"name":"server","imageUri":"%s:%s"}]' "$ECR_REPO_URI" "$CODEBUILD_RESOLVED_SOURCE_VERSION" > imagedefinitions.json
