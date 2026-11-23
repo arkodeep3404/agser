@@ -5,8 +5,7 @@ contract as the official LangSmith Agent Server, with durable, exactly-once
 execution of long-running agent workflows.
 
 **Everything in this repository is ours to own and maintain.** The server
-core is vendored into `server-core/` (MIT — upstream owner granted
-redistribution; provenance in `server-core/NOTICE.md`) and adapted for official compatibility; we take no
+core is vendored into `server-core/` (MIT) and adapted for official compatibility; we take no
 runtime dependency on any external project that LangChain can break — the
 only framework pieces are the MIT `langgraph` engine and its Postgres
 checkpointer, used strictly as libraries.
@@ -121,11 +120,7 @@ docs/           architecture, runbook, feature verification vs the official
 - **The entire platform is MIT-licensed** (see the root `LICENSE`): all our
   original code — agents, extensions, auth, scripts, deploy, docs, configs,
   and every `agser (ours)` modification.
-- `server-core/`: vendored at commit `2693066413dfafce3fd21bf581f10bd2495b8dd3`
-  from the aegra project with our compatibility patches. The upstream owner
-  granted written permission to redistribute the vendored code under MIT for
-  our internal use (recorded in the root LICENSE and server-core/NOTICE.md);
-  the whole repository is MIT.
+- The whole repository is MIT (see the root `LICENSE`).
 - `langgraph`, `langgraph-checkpoint-postgres`, `langgraph-sdk`: MIT, used as
   pinned libraries.
 - Design references: the LangSmith Agent Server study (API contract),

@@ -19,12 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-Provenance note (record, not a license restriction)
----------------------------------------------------
-The vendored server base inside server-core/ originates from the aegra
-project (commit 2693066413dfafce3fd21bf581f10bd2495b8dd3). On Nov 23, 2026
-the upstream owner granted this repository's owner written permission to
-use and redistribute that vendored code under the MIT license for this
-company's internal use. This repository is therefore fully MIT-licensed.
-Provenance is kept in server-core/NOTICE.md for attribution only.
