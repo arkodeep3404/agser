@@ -99,6 +99,24 @@ For the local AWS emulator (FloCI): see `docs/` — includes the emulator-only
 context flags (`agser:dbPassword`, `agser:imageUri`, `agser:redisUri`) used
 in this session's validation.
 
+## Documentation
+
+Complete handoff documentation (written for AI agents taking over this
+project — read `AGENTS.md` first):
+
+- `AGENTS.md` — entry point: verified state, the upgrade-gate rule, repo
+  map, every server-core patch, queued work, hard-won gotchas
+- `docs/ARCHITECTURE.md` — system shape, request lifecycle, crash-recovery
+  machinery, streaming, security layers
+- `docs/DEVELOPER-GUIDE.md` — every component in detail, complete env-var
+  reference, endpoint/agent reference, change conventions
+- `docs/RUNBOOK.md` — local/emulator/real-AWS deploys, upgrade procedure,
+  troubleshooting, security posture
+- `docs/HANDOFF.md` — decision log and bug archaeology (the "why"s not in
+  code)
+- `docs/FEATURE-VERIFICATION.md` — every LangSmith-inventory item mapped
+  to its verification evidence
+
 ## Layout
 
 ```
