@@ -131,19 +131,19 @@ wait_server() {
 sec "W1 — full happy path: approve all 3 gates"
 T=$(start_workflow)
 wait_interrupted "$T" || t "W1.1 paused at gate 1" fail "never interrupted"
-t "W1.1 paused at gate 1" "$( [ "$(status_of "$T")" = interrupted ] && echo ok || echo fail)"
+t "W1.1 paused at gate 1" "$( wait_status "$T" interrupted 45 && echo ok || echo fail)" "status=$(status_of "$T")"
 
 GATE1_CTX=$(api "${BASE}/threads/$T/state" "${AUTH[@]}" | py "import json,sys;d=json.load(sys.stdin);tasks=d.get('tasks') or [];print(any('gate.*1' in str(t.get('interrupts',[])) or '\"gate\": 1' in str(t.get('interrupts',[])) for t in tasks))")
 t "W1.2 gate 1 payload visible" "$([ "$GATE1_CTX" = True ] && echo ok || echo skip)" "interrupt value check"
 
 R=$(resume_gate "$T" true); wait_interrupted "$T"
-t "W1.3 gate 1 approved → paused at gate 2" "$( [ "$(status_of "$T")" = interrupted ] && echo ok || echo fail)"
+t "W1.3 gate 1 approved → paused at gate 2" "$( wait_status "$T" interrupted 45 && echo ok || echo fail)" "status=$(status_of "$T")"
 
 ENRICH=$(stage_results_count "$T")
 t "W1.4 enrich data present at gate 2 (stage_results >= 2)" "$([ "${ENRICH:-0}" -ge 2 ] 2>/dev/null && echo ok || echo fail)" "results=${ENRICH}"
 
 R=$(resume_gate "$T" true); wait_interrupted "$T"
-t "W1.5 gate 2 approved → paused at gate 3" "$( [ "$(status_of "$T")" = interrupted ] && echo ok || echo fail)"
+t "W1.5 gate 2 approved → paused at gate 3" "$( wait_status "$T" interrupted 45 && echo ok || echo fail)" "status=$(status_of "$T")"
 
 EXEC=$(fx_count "$T" execute)
 t "W1.6 irreversible action executed once before gate 3" "$([ "${EXEC:-0}" = 1 ] && echo ok || echo fail)" "fx_execute=${EXEC}"
@@ -164,7 +164,7 @@ t "W1.12 total side effects = 4 (one per stage)" "$([ "${TOTAL_FX:-x}" = 4 ] && 
 sec "W2 — reject at gate 1 → stages 2–3 never execute"
 T=$(start_workflow); wait_interrupted "$T"
 resume_gate "$T" false > /dev/null; wait_idle "$T"
-t "W2.1 exited cleanly after rejection" "$( [ "$(status_of "$T")" = idle ] && echo ok || echo fail)"
+t "W2.1 exited cleanly after rejection" "$( wait_status "$T" idle 45 && echo ok || echo fail)" "status=$(status_of "$T")"
 
 FX_INTAKE=$(fx_count "$T" intake); FX_ENRICH=$(fx_count "$T" enrich); FX_EXEC=$(fx_count "$T" execute)
 t "W2.2 intake ran once"          "$([ "${FX_INTAKE:-x}" = 1 ] && echo ok || echo fail)" "fx=${FX_INTAKE}"
@@ -308,7 +308,7 @@ resume_gate "$T" true > /dev/null; wait_interrupted "$T"   # gate 2
 api -X POST "${BASE}/threads/$T/state" "${AUTH[@]}" \
   -d '{"values":{"messages":[{"role":"user","content":"human-edited-during-pause"}]},"as_node":"gate_approve_plan"}' > /dev/null
 R=$(resume_gate "$T" true); wait_interrupted "$T"
-t "W7.1 state surgery accepted + resume works from gate 2" "$( [ "$(status_of "$T")" = interrupted ] && echo ok || echo fail)"
+t "W7.1 state surgery accepted + resume works from gate 2" "$( wait_status "$T" interrupted 45 && echo ok || echo fail)" "status=$(status_of "$T")"
 resume_gate "$T" true > /dev/null; wait_idle "$T"
 FX_ALL=$(fx_count "$T")
 t "W7.2 completed with all fx exact after surgery" "$([ "${FX_ALL:-x}" = 4 ] && echo ok || echo fail)" "total=${FX_ALL}"

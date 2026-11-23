@@ -2,67 +2,53 @@
 
 **A production-grade, self-hosted Agent Server for deep agents — on your own AWS, with the same API contract as the official LangSmith Agent Server.**
 
-Durable execution · exactly-once recovery · human-in-the-loop · MCP · A2A · AES-256 encryption at rest · self-hosted Langfuse tracing · MIT licensed.
+Durable execution · exactly-once recovery · human-in-the-loop · MCP · A2A · Agent Protocol v2 · AES-256 encryption at rest · self-hosted Langfuse tracing · MIT licensed.
 
-Built to run **long-running agent workflows persistently on AWS**, survive crashes, and never run a completed step twice. Every claim in this README was verified by an executable test suite that ships with the repo.
+Built to run **long-running agent workflows persistently on AWS**, survive crashes, and never re-run a completed step. Every claim in this README is backed by an executable suite that ships in this repository.
 
 ---
 
 ## Table of contents
 
 - [Why this exists](#why-this-exists)
-- [What it does](#what-it-does)
 - [Architecture](#architecture)
 - [The exactly-once guarantee](#the-exactly-once-guarantee)
 - [Feature list](#feature-list)
 - [Verified state](#verified-state)
-- [Quickstart (local)](#quickstart-local)
+- [Quickstart](#quickstart)
 - [Running agents](#running-agents)
 - [Agents included](#agents-included)
 - [API surface](#api-surface)
 - [Configuration reference](#configuration-reference)
 - [Deploy to AWS](#deploy-to-aws)
 - [CI/CD](#cicd)
-- [Observability (Langfuse)](#observability-langfuse)
+- [Observability](#observability)
 - [Security](#security)
 - [Upgrading safely](#upgrading-safely)
 - [Repository layout](#repository-layout)
 - [Documentation](#documentation)
-- [Known limitations & queued work](#known-limitations--queued-work)
+- [Scope decisions](#scope-decisions)
 - [License](#license)
 
 ---
 
 ## Why this exists
 
-The official LangSmith Agent Server is excellent, but its **durable runtime** (the part that makes runs survive crashes) is license-gated in production. The free local build (`langgraph dev` family) executes runs in-process with container-local persistence — which means state is lost when a container is recreated. On ECS Fargate, where tasks are ephemeral, that is fatal for long-running agents.
+The official LangSmith Agent Server is excellent, but its **durable runtime** — the part that makes runs survive crashes — is license-gated in production. The free local build executes runs in-process with container-local persistence, so state dies with the container. On ECS Fargate, where tasks are ephemeral, that is fatal for long-running agents.
 
 This platform takes a different route:
 
 | | Official public build | **agser** |
 |---|---|---|
 | API contract | official | **same contract** (verified 1:1 against it) |
-| Durable runs (Postgres) | ✗ (container-local disk) | ✓ |
-| Crash recovery / reaper | ✗ | ✓ |
+| Durable runs (Postgres) | ✗ container-local disk | ✓ |
+| Crash recovery / lease reaper | ✗ | ✓ |
 | Exactly-once per super-step | ✗ | ✓ |
-| Runs on your AWS, data stays in-account | license-gated | ✓ always |
-| MCP / A2A / metrics / batch | ✓ | ✓ |
+| Runs on your AWS, data never leaves the account | license-gated | ✓ always |
+| MCP · A2A · metrics · batch · v2 protocol | ✓ | ✓ |
 | License | Elastic-2.0 / commercial | **MIT** |
 
-The server core is **vendored into this repository** and owned here — no dependency on any third party's release cycle, no coupling to LangChain's internal server interfaces. The only framework pieces used are the MIT `langgraph` engine and its Postgres checkpointer, consumed strictly as pinned libraries.
-
----
-
-## What it does
-
-1. **Runs deep agents** (LangChain `deepagents`) with planning, subagents, filesystem tools, tool-approval gates and structured output.
-2. **Persists every super-step** to Postgres before the next one starts.
-3. **Recovers automatically** — a lease reaper detects runs whose worker died, re-enqueues them, and the engine resumes from the last checkpoint.
-4. **Pauses for humans** at `interrupt()` gates — for minutes, hours or days — with zero compute while waiting, and resumes from the exact point.
-5. **Streams** tokens and events over SSE from any replica (Redis pub/sub, no sticky sessions).
-6. **Exposes every agent** over REST, **MCP** (Streamable HTTP) and **A2A**.
-7. **Traces** every run, LLM call and tool call to self-hosted Langfuse — never to a third party.
-8. **Scales** on CPU, requests-per-target and pending-run backlog.
+The server core is **vendored into this repository and owned here** — no dependency on any third party's release cycle, and no coupling to LangChain's internal server interfaces. The only framework pieces used are the MIT `langgraph` engine and its Postgres checkpointer, consumed strictly as pinned libraries.
 
 ---
 
@@ -92,32 +78,32 @@ The server core is **vendored into this repository** and owned here — no depen
 
 **Request lifecycle** (`POST /threads/{id}/runs`):
 
-1. API validates auth → enforces double-texting strategy → resolves the assistant (graph factories) → inserts the run row (`pending`) → `RPUSH` the run id onto the Redis queue.
+1. API validates auth → enforces the double-texting strategy → resolves the assistant (graph factories) → inserts the run row (`pending`) → `RPUSH` the run id onto the Redis queue. With `after_seconds`, the run is created `pending` with a `_not_before` timestamp and **not** submitted.
 2. Any worker `BLPOP`s the queue, claims the run (Postgres lease, `SKIP LOCKED`), heartbeats every 10s.
-3. The worker executes the graph via `langgraph` with the Postgres checkpointer; each super-step commits a checkpoint (AES-256-GCM encrypted when a key is set). Events publish to Redis pub/sub; any API replica relays SSE.
+3. The worker executes the graph via `langgraph` with the Postgres checkpointer; every super-step commits a checkpoint (AES-256-GCM encrypted when a key is set). Events publish to Redis pub/sub; any API replica relays SSE.
 4. `interrupt()` finalizes the run as `interrupted`; resume is a new run carrying `command.resume` — the engine continues from the checkpoint.
-5. On completion the run status/output is written, the webhook fires (HMAC-signed), the lease releases.
+5. On completion the status/output is written, the webhook fires (HMAC-signed), the lease releases.
 
 ---
 
 ## The exactly-once guarantee
 
-This is the platform's core promise, and it is instrumented rather than asserted.
+The platform's core promise, instrumented rather than asserted.
 
 - Every super-step commits to Postgres **before** the next one starts → a completed step is durable and never re-executed.
 - Workers heartbeat; a **lease reaper** sweeps for lapsed heartbeats, re-enqueues the run, and any live worker resumes from the last checkpoint.
 - A step that was *in flight* at the moment of death re-runs from its start — so business tools must be idempotent per step (the same rule the official docs state).
 - SIGTERM drain returns in-flight runs to the queue; ECS rolling deploys use `minHealthyPercent: 100`.
 
-**How it is proven** (three independent layers):
+**Three independent instrumentation layers:**
 
 | Instrument | What it counts |
 |---|---|
-| `approval`, `sleepy` graphs | append `prep:<uuid>` per execution → suites assert count == 1 across crashes |
-| `workflow` graph | appends `fx:<stage>:<uuid>` across **three sequential HITL gates and four stages** → per-gate recovery verified |
+| `approval`, `sleepy` graphs | `prep:<uuid>` per execution → suites assert count == 1 across crashes |
+| `workflow` graph | `fx:<stage>:<uuid>` across **three sequential HITL gates and four stages** → per-gate recovery verified |
 | `complex` graph | unique `tool_call_id`s → zero duplicate tool calls across HITL resumes |
 
-**Proof that was actually run** (see `docs/FEATURE-VERIFICATION.md`):
+**The proof that was actually run:**
 
 > Multi-gate workflow paused at gate 2 with `side_effects = [intake, enrich]` → killed **all** ECS tasks *and* stopped the AWS emulator control plane (platform returned HTTP 000) → restarted → thread still `interrupted` at gate 2, `side_effects` still exactly `[intake, enrich]`, `stage_results` intact → resumed → `execute` ran once → gate 3 → `report` ran once → completed.
 >
@@ -129,23 +115,24 @@ This is the platform's core promise, and it is instrumented rather than asserted
 
 ### Execution & durability
 - Postgres-backed run queue with Redis wake-up (`BLPOP`), `SKIP LOCKED` claiming, per-worker concurrency (`N_JOBS_PER_WORKER`, default 10 × 3 workers).
-- Lease + heartbeat + **crash reaper** (automatic recovery, no sidecar needed).
-- Graceful shutdown drain; retry counters; 24h run timeout; recursion limit enforcement.
-- Durable checkpoints per super-step, with **AES-256-GCM encryption at rest** (`LANGGRAPH_AES_KEY`) and backward-compatible reads of pre-encryption blobs.
+- Lease + heartbeat + **crash reaper** — automatic recovery, no sidecar.
+- Graceful shutdown drain; retry counters; 24h run timeout; recursion-limit enforcement.
+- **Delayed runs** (`after_seconds`) honoured by both claim paths (reaper and the Redis-outage Postgres fallback).
+- Durable checkpoints per super-step with **AES-256-GCM encryption at rest** (`LANGGRAPH_AES_KEY`), backward-compatible with pre-encryption blobs.
 
 ### Agent server API (official contract)
 - **Assistants**: create/get/update/delete, search, count, schemas, graph, subgraphs, **versioning + rollback**, full-replace updates.
 - **Threads**: create (metadata, caller-chosen UUID, `if_not_exists`), get, patch, search+sort, count, delete, copy, prune.
-- **State**: get, state-at-checkpoint, history (POST), update state (`as_node`), fork/time-travel from any checkpoint.
-- **Runs**: wait / background / stream / stateless / batch; join; cancel (`interrupt`); list/get/delete; **`after_seconds`** delayed start (honoured by both claim paths).
+- **State**: get, state-at-checkpoint, history, update state (`as_node`), fork/time-travel from any checkpoint.
+- **Runs**: wait / background / stream / stateless / batch; join; cancel (`interrupt`); list/get/delete; `after_seconds`.
 - **Double-texting**: `enqueue` (default), `reject` → 409, `interrupt`, `rollback` — enforced server-side.
 - **Streaming**: `values`, `updates`, `messages-tuple`, `custom`, multiple modes at once, `stream_subgraphs`, join-stream, resumable streams (`Last-Event-ID`), cross-replica relay.
 - **Agent Protocol v2**: thread-scoped event stream (`POST /threads/{id}/stream/events`) with channel filters, `id:` seq envelopes, `since=` replay, and `run.start` commands (`POST /threads/{id}/commands`).
-- **Human-in-the-loop**: `interrupt()` pause, pending payload in state, resume via `Command`, static breakpoints (`interrupt_before/after`), state surgery before resume, zero-compute waits, survives server restarts.
+- **Human-in-the-loop**: `interrupt()` pause, pending payload in state, resume via `Command`, static breakpoints (`interrupt_before/after`), state surgery before resume, zero-compute waits, survives server restarts and full outages.
 - **Store**: put/get/delete/search, namespaces, **semantic search** (pgvector; provider-agnostic embeddings — Bedrock, OpenAI, or an offline fake server for CI).
 - **Crons**: CRUD + search + count + GET-by-id, thread-bound and stateless, UTC 5-field, official semantics (create never auto-fires a run).
 
-### Protocols & extensions (ours, `extensions/app.py`)
+### Protocols & extensions (ours — `extensions/app.py`)
 | Endpoint | Purpose |
 |---|---|
 | `GET /ok` | public health probe (official-compatible) |
@@ -153,16 +140,15 @@ This is the platform's core promise, and it is instrumented rather than asserted
 | `POST /threads/count` | official count-by-filter |
 | `POST /runs/batch` | official batch create |
 | `POST /threads/{id}/copy` | thread copy incl. latest checkpoint |
-| `POST /mcp` | **MCP** Streamable HTTP — `initialize`, `tools/list`, `tools/call`; one tool per graph with its real input schema. **HITL round-trip** via reserved `_thread_id` / `_resume` arguments: an interrupted call returns the interrupt payload plus a `resume_hint` |
+| `POST /mcp` | **MCP** Streamable HTTP — `initialize`, `tools/list`, `tools/call`; one tool per graph with its real input schema. **HITL round-trip** via reserved `_thread_id` / `_resume` arguments: an interrupted call returns the interrupt payload, thread/run ids and a `resume_hint` |
 | `GET /.well-known/agent-card.json` | **A2A** agent card |
 | `POST /a2a/{assistant_id}` | **A2A** `message/send` |
 
 ### Auth, security, webhooks
 - Platform API-key auth (`x-api-key` or `Authorization: Bearer`), constant-time compare, hard-fail if unset.
 - **Optional multi-key isolation** (`PLATFORM_API_KEYS=key:identity`): each key is its own identity, fully isolated by the core's `user_id` scoping. Off by default.
-- Per-resource authorization map in the core (resource × action).
 - Webhook delivery with SSRF policy (domain allowlist, loopback/private-IP blocking), **HMAC-SHA256 signing** (`X-Agser-Signature`), retries with backoff, and **zero-downtime secret rotation** (dual signature via `X-Agser-Signature-Previous`).
-- Secrets via AWS Secrets Manager; `.env` gitignored.
+- Secrets in AWS Secrets Manager; `.env` gitignored.
 
 ### Observability
 - OpenTelemetry auto-instrumentation of runs, LLM calls and tool calls.
@@ -171,18 +157,18 @@ This is the platform's core promise, and it is instrumented rather than asserted
 - CloudWatch custom metrics (`PendingRuns`, `RunningRuns`) feeding backlog autoscaling; CloudWatch alarms → SNS.
 
 ### Infrastructure
-- CDK stack: VPC (2 AZ, per-AZ NAT), ECR, Secrets Manager, RDS Postgres 16 Multi-AZ (7-day PITR), ElastiCache Redis replication group (auto-failover), internet-facing ALB (SSE-friendly timeouts), ECS Fargate (ARM64, circuit-breaker rolling deploys), autoscaling (CPU + requests + backlog step scaling), CloudWatch alarms → SNS.
-- Optional **AWS-native CI/CD**: CodePipeline → CodeBuild (builds ARM64 image, runs all suites, pushes ECR) → ECS rolling deploy.
+- CDK stack: VPC (2 AZ, per-AZ NAT), ECR, Secrets Manager, RDS Postgres 16 Multi-AZ (7-day PITR), ElastiCache Redis replication group (auto-failover), internet-facing ALB (SSE-friendly timeouts), ECS Fargate (ARM64, circuit-breaker rolling deploys), autoscaling (CPU + requests-per-target + backlog step scaling), CloudWatch alarms → SNS.
+- Optional **AWS-native CI/CD**: CodePipeline → CodeBuild (ARM64 build, all suites, ECR push) → ECS rolling deploy.
 
 ---
 
 ## Verified state
 
-Every row below is re-runnable from this repository. Current status:
+Every row is re-runnable from this repository.
 
 | Suite | Command | Coverage | Result |
 |---|---|---|---|
-| Config sync | `./scripts/check-config-sync.sh` | the 3 config files register the same graph set | **PASS** |
+| Config sync | `./scripts/check-config-sync.sh` | all four config files register the same graph set | **PASS** |
 | Platform smoke | `./scripts/verify.sh` | health, auth, threads, sync/stream/background runs, state, crons, store + semantic search, `/metrics`, HITL interrupt→resume | **PASS** (local + AWS ALB) |
 | Feature conformance | `./scripts/test-features.sh` | ~60 checks across the LangSmith inventory (§1–11, 14). STRICT by default — a regression FAILS; `PARITY=1` keeps documented official divergences as SKIPs | **63/63 ours · 63/63 official · 62/62 AWS** |
 | Failure injection | `./scripts/test-failures.sh` | server killed mid-run → reaper → checkpoint resume; client network drop → run survives → stream rejoins; cancel; 4-way parallel — all asserting exactly-once | **PASS** |
@@ -192,11 +178,11 @@ Every row below is re-runnable from this repository. Current status:
 | Multi-key isolation | `./scripts/test-multitenancy.sh` | 9 checks: two identities, cross-tenant read/search/run/delete denied, unknown key 401 (SKIPs when unconfigured) | **9/9 in multi-key mode** |
 | Upgrade gate | `./scripts/upgrade-check.sh` | rebuild with fresh deps + functional readiness probe + all eight suites | **GREEN** |
 
-Additionally verified (not in the gate): **AWS kill-task** (`ecs stop-task` mid-run → reaper → resume → exactly once), **full emulator crash** (see above), **AES ciphertext at rest** (encrypted blob markers in Postgres, zero plaintext), **MCP** tools/list + tools/call, **A2A** message round-trip, **webhook HMAC** signature validity, **Langfuse** ingestion.
+Also verified independently: **AWS kill-task** (`ecs stop-task` mid-run → reaper → resume → exactly once), the **full emulator crash** above, **AES ciphertext at rest** (encrypted blob markers in Postgres, zero plaintext), **MCP** tools/list + tools/call + interrupt→resume, **A2A** message round-trip, **webhook HMAC** validity plus rotation, and **Langfuse** ingestion.
 
 ---
 
-## Quickstart (local)
+## Quickstart
 
 ```bash
 git clone https://github.com/arkodeep3404/agser.git && cd agser
@@ -205,9 +191,9 @@ docker compose up -d --build  # postgres(pgvector) + redis + fake-embeddings + s
 ./scripts/verify.sh           # must be green
 ```
 
-Server: **http://127.0.0.1:8123** · API docs: **/docs** · API key: `dev-key` (from `.env`).
+Server **http://127.0.0.1:8123** · API docs **/docs** · API key `dev-key`.
 
-Optional parity target — the official public build on `:8124`:
+Parity target — the official public build on `:8124`:
 
 ```bash
 docker compose --profile official up -d --build
@@ -224,11 +210,11 @@ Local ports: `8123` server · `8124` official · `55432` Postgres · `56379` Red
 KEY=dev-key
 BASE=http://127.0.0.1:8123
 
-# create a thread
+# thread
 TID=$(curl -s -X POST $BASE/threads -H "x-api-key: $KEY" \
   -H 'Content-Type: application/json' -d '{}' | jq -r .thread_id)
 
-# run an agent and wait for the result
+# run and wait
 curl -s -X POST $BASE/threads/$TID/runs/wait -H "x-api-key: $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"assistant_id":"research",
@@ -239,6 +225,12 @@ curl -N -X POST $BASE/threads/$TID/runs/stream -H "x-api-key: $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"hi"}]},
        "stream_mode":["messages-tuple"]}'
+
+# delayed run (starts in 60s)
+curl -s -X POST $BASE/threads/$TID/runs -H "x-api-key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"later"}]},
+       "after_seconds":60}'
 ```
 
 Python SDK (identical to the official one):
@@ -258,13 +250,19 @@ async for chunk in client.runs.stream(
 Human-in-the-loop resume:
 
 ```bash
-# the run pauses; thread status becomes "interrupted"
 curl -s -X POST $BASE/threads/$TID/runs/wait -H "x-api-key: $KEY" \
   -H 'Content-Type: application/json' \
   -d '{"assistant_id":"approval","command":{"resume":{"approved":true}}}'
 ```
 
-A fuller tour of every feature (assistants, versions, streaming modes, store, crons, HITL) lives in `examples/client_usage.py`.
+The same over **MCP** — an interrupted `tools/call` returns the interrupt payload plus a `resume_hint`; continue with the reserved arguments:
+
+```json
+{"name": "approval",
+ "arguments": {"_thread_id": "<thread>", "_resume": {"approved": true}}}
+```
+
+A full feature tour (assistants, versions, streaming modes, store, crons, HITL) is in `examples/client_usage.py`.
 
 ---
 
@@ -274,20 +272,18 @@ A fuller tour of every feature (assistants, versions, streaming modes, store, cr
 |---|---|---|
 | `ping` | no-LLM echo graph | every suite's fast path |
 | `research` | deep agent (factory): catalog tools + researcher subagent | real-world deep-agent demo |
-| `complex` | deep agent: planning, **3 subagents** (researcher / analyst / writer), `SummarizationMiddleware`, **`interrupt_on` tool-approval gate**, structured `Report` output | proves HITL + subagents + zero duplicate tool calls |
+| `complex` | deep agent: planning, **3 subagents**, `SummarizationMiddleware`, **`interrupt_on` tool-approval gate**, structured `Report` | proves HITL + subagents + zero duplicate tool calls |
 | `approval` | deterministic single-gate HITL graph (`prep` → `interrupt` → `finish`) | the exactly-once instrument |
 | `workflow` | **multi-gate pipeline**: `intake → GATE1 → enrich → GATE2 → execute → GATE3 → report` (+ `rejected` exit) | proves recovery from the exact point where the human was called |
-| `sleepy` | slow graph (`prep` + sleep) | crash/network-drop/parallel recovery tests |
+| `sleepy` | slow graph (`prep` + sleep) | crash / network-drop / parallel recovery tests |
 
-All LLM-backed agents are registered as **factories** (`make(config)`), so the model is resolved per-run: per-assistant overrides work, and a bad credential fails one run instead of the whole server boot.
+LLM-backed agents are registered as **factories** (`make(config)`), so the model resolves per-run: per-assistant overrides work, and a bad credential fails one run instead of the whole server boot.
 
 Inference is **never hardcoded** — `MODEL_PROVIDER` selects `openrouter`, `bedrock` (IAM-based, data stays in-account) or `anthropic`, or pass `{"configurable":{"model":"provider:model"}}` per assistant.
 
 ---
 
 ## API surface
-
-Official Agent Server contract (verified 1:1 against the upstream build):
 
 ```
 GET    /ok                                  GET    /info
@@ -308,8 +304,8 @@ DELETE /threads/{id}                        POST   /threads/{id}/copy
 GET    /threads/{id}/state                  POST   /threads/{id}/state
 GET    /threads/{id}/state/{checkpoint}     POST   /threads/{id}/state/checkpoint
 GET    /threads/{id}/history                POST   /threads/{id}/history
-GET    /threads/{id}/stream                 POST   /threads/{id}/stream/events
-POST   /threads/{id}/commands
+GET    /threads/{id}/stream                 POST   /threads/{id}/stream/events   (v2)
+POST   /threads/{id}/commands                                                 (v2)
 
 POST   /threads/{id}/runs                   POST   /threads/{id}/runs/wait
 POST   /threads/{id}/runs/stream            GET    /threads/{id}/runs
@@ -341,7 +337,7 @@ POST   /a2a/{assistant_id}
 | Variable | Default | Purpose |
 |---|---|---|
 | `PLATFORM_API_KEY` | `dev-key` (local) | shared API key clients send; server 500s if unset |
-| `PLATFORM_API_KEYS` | — | optional `key:identity,key:identity` → isolated identities (tenant-style) |
+| `PLATFORM_API_KEYS` | — | optional `key:identity,key:identity` → isolated identities |
 | `LANGGRAPH_AES_KEY` | dev key (local) | 16/24/32-byte key → AES-256-GCM checkpoint encryption at rest |
 | `AGSER_WEBHOOK_SECRET` | — | enables `X-Agser-Signature` HMAC-SHA256 on webhooks |
 | `AGSER_WEBHOOK_SECRET_PREVIOUS` | — | rotation window: also sends `X-Agser-Signature-Previous` |
@@ -371,7 +367,7 @@ POST   /a2a/{assistant_id}
 ### Embeddings
 `EMBEDDINGS_PROVIDER` = `fake` (offline, deterministic — used in CI) \| `openai` \| `bedrock`. All emit 1024-dim vectors to match `store.index.dims`.
 
-See `.env.example` for the full annotated list.
+`.env.example` carries the full annotated list.
 
 ---
 
@@ -389,7 +385,7 @@ cd ../..
 # rollback: ROLLBACK_TO=<git-sha-tag> ./scripts/deploy-image.sh
 ```
 
-Then set your model secret and verify:
+Then set the model secret and verify:
 
 ```bash
 aws secretsmanager put-secret-value --secret-id agser/openrouter-api-key --secret-string "$KEY"
@@ -397,11 +393,11 @@ BASE=http://<AlbDns> PLATFORM_API_KEY=$(aws secretsmanager get-secret-value \
   --secret-id agser/platform-api-key --query SecretString --output text) ./scripts/verify.sh
 ```
 
-Useful CDK context flags: `certificateArn`, `allowedCidrs`, `alertEmail`, `modelProvider`, `agentModel`, `bedrockModelId`, `otelEndpoint`, `configFile` (default `aegra.aws.json` — with the semantic store index on Bedrock embeddings), sizing (`desiredCount`, `cpu`, `memoryMiB`, `dbInstanceClass`, `dbMultiAz`, `redisNodeType`, `maxCapacity`), and `agser:cicd` for the native pipeline.
+CDK context flags: `certificateArn`, `allowedCidrs`, `alertEmail`, `modelProvider`, `agentModel`, `bedrockModelId`, `otelEndpoint`, `configFile` (default `aegra.aws.json` — semantic store index on Bedrock embeddings), sizing (`desiredCount`, `cpu`, `memoryMiB`, `dbInstanceClass`, `dbMultiAz`, `redisNodeType`, `maxCapacity`), and `agser:cicd`.
 
 ### Local AWS emulator (FloCI)
 
-Emulator-only context flags (never use in real AWS): `agser:dbPassword`, `agser:imageUri` (an immutable tag on `localhost:5100/...`), `agser:redisUri` (a **different Redis db**). Full walkthrough, quirks and the crash drill are in `docs/RUNBOOK.md`.
+Emulator-only flags — never use these in real AWS: `agser:dbPassword`, `agser:imageUri` (an immutable tag on `localhost:5100/...`), `agser:redisUri` (a **different Redis db**), `agser:configFile=aegra.aws.emulator.json` (the emulator's RDS has no `pgvector`, so the store index is omitted). Full walkthrough, quirks and the crash drill: `docs/RUNBOOK.md`.
 
 ---
 
@@ -409,12 +405,12 @@ Emulator-only context flags (never use in real AWS): `agser:dbPassword`, `agser:
 
 Both options ship and coexist:
 
-- **GitHub Actions** (`.github/workflows/ci.yml`) — builds the stack, runs all suites, runs the **parity** suites against the official build, and validates `cdk synth`.
-- **AWS-native** (`deploy/cicd/`) — CodePipeline (CodeStar GitHub source) → CodeBuild (ARM64 image build, ECR push, **all suites**, `imagedefinitions.json`) → ECS rolling deploy. Enable with `-c agser:cicd=true -c agser:codestarConnectionArn=... -c agser:githubOwner=... -c agser:githubRepo=...`. See `deploy/cicd/README.md`.
+- **GitHub Actions** (`.github/workflows/ci.yml`) — builds the stack, runs every suite, runs the **parity** suites against the official build, validates `cdk synth`.
+- **AWS-native** (`deploy/cicd/`) — CodePipeline (CodeStar GitHub source) → CodeBuild (ARM64 image build, ECR push, **all suites**, `imagedefinitions.json`) → ECS rolling deploy. Enable with `-c agser:cicd=true -c agser:codestarConnectionArn=... -c agser:githubOwner=... -c agser:githubRepo=...`.
 
 ---
 
-## Observability (Langfuse)
+## Observability
 
 Self-hosted Langfuse, in your own AWS — no third-party tracing, ever:
 
@@ -425,7 +421,7 @@ LANGFUSE_PUBLIC_KEY=pk-...
 LANGFUSE_SECRET_KEY=sk-...
 ```
 
-Exports OTLP to `{base}/api/public/otel/v1/traces`. Verified end-to-end: one deep-agent run produced **295 events** (AGENT / CHAIN / TOOL / GENERATION spans with model metadata). AWS deployment path (official Terraform module) and local recipe: `deploy/langfuse/README.md`.
+Exports OTLP to `{base}/api/public/otel/v1/traces`. Verified: one deep-agent run produced **295 events** (AGENT / CHAIN / TOOL / GENERATION spans with model metadata). AWS deployment path and local recipe: `deploy/langfuse/README.md`.
 
 > Langfuse v4 runs in `events_only` mode — inspect traces in the UI or ClickHouse `events_core`, not the retired REST endpoint.
 
@@ -436,7 +432,7 @@ Exports OTLP to `{base}/api/public/otel/v1/traces`. Verified end-to-end: one dee
 - **API-key auth** on every data route; open routes are exactly `/ok`, `/health`, `/ready`, `/live`, `/metrics`, `/info`, `/docs`, `/openapi.json`.
 - **AES-256-GCM** checkpoint encryption at rest (verified ciphertext in Postgres); RDS storage encryption + KMS cover the rest.
 - **Secrets** in AWS Secrets Manager, injected into the task; `.env` is gitignored and never committed.
-- **Webhooks**: SSRF policy (domain allowlist, loopback/private-IP blocking) + HMAC signatures.
+- **Webhooks**: SSRF policy (domain allowlist, loopback/private-IP blocking) + HMAC signatures with rotation support.
 - **Tracing**: Langfuse only, inside your account; LangSmith hard-disabled.
 - **ALB**: restrict with `-c allowedCidrs=[...]`, terminate HTTPS with `-c certificateArn=...`.
 
@@ -445,10 +441,10 @@ Exports OTLP to `{base}/api/public/otel/v1/traces`. Verified end-to-end: one dee
 ## Upgrading safely
 
 ```bash
-./scripts/upgrade-check.sh      # rebuild with fresh deps + all six suites
+./scripts/upgrade-check.sh      # rebuild with fresh deps + all eight suites
 ```
 
-That gate is the contract: **nothing ships unless it is green.** It protects against upstream drift, dependency regressions and our own mistakes. `server/requirements.lock.txt` records the last-known-good dependency set for rollback reference (it is a record, not enforced).
+That gate is the contract: **nothing ships unless it is green.** It protects against upstream drift, dependency regressions and our own mistakes. It also waits for *functional* readiness (a real store write), because liveness is not readiness.
 
 `scripts/check-config-sync.sh` runs in the gate too — it catches a graph registered in one config but missing from another (a real bug that once caused 35 parity failures).
 
@@ -461,20 +457,23 @@ AGENTS.md                 entry point for AI agents taking over this project
 README.md                 this file
 LICENSE                   MIT
 docker-compose.yml        local stack (server :8123, official parity :8124)
-server-core/              our server core (vendored + our patches, MIT)
+server-core/              our server core (vendored + 10 marked patches, MIT)
 extensions/app.py         our endpoints: MCP, A2A, metrics, batch, copy, CW publisher
 agents/                   ping, research, complex, approval, workflow, sleepy
-auth.py                   platform API-key auth
-aegra.json                local config      aegra.aws.json  AWS config
+auth.py                   API-key auth (single or multi-key isolation)
+aegra.json                local config
+aegra.aws.json            real-AWS config (store index on, Bedrock embeddings)
+aegra.aws.emulator.json   FloCI config (no store index — no pgvector there)
 langgraph.json            config for the official parity build
 server/                   Dockerfiles (ours + official parity), healthcheck, entrypoint
 scripts/                  verify · test-features · test-hitl · test-failures ·
-                          test-workflow · check-config-sync · upgrade-check ·
-                          aws-restart-tasks · deploy-image · local-up/down
+                          test-workflow · test-v2-stream · test-multitenancy ·
+                          check-config-sync · upgrade-check · aws-restart-tasks ·
+                          rotate-webhook-secret · deploy-image · local-up/down
 deploy/cdk/               AWS infrastructure (PlatformStack + optional CicdStack)
 deploy/cicd/              CodeBuild buildspec + CodePipeline guide
 deploy/langfuse/          Langfuse AWS deployment + wiring
-examples/                 SDK feature tour, HMAC-verifying webhook receiver,
+examples/                 SDK feature tour, rotation-aware webhook receiver,
                           offline OpenAI-compatible embeddings server
 docs/                     ARCHITECTURE · DEVELOPER-GUIDE · RUNBOOK · HANDOFF ·
                           FEATURE-VERIFICATION
@@ -487,37 +486,24 @@ docs/                     ARCHITECTURE · DEVELOPER-GUIDE · RUNBOOK · HANDOFF 
 
 | Document | Contents |
 |---|---|
-| **[AGENTS.md](AGENTS.md)** | Entry point: verified-state table, the upgrade-gate rule, repo map, **every server-core patch with file locations**, queued work, and the hard-won gotchas |
+| **[AGENTS.md](AGENTS.md)** | Entry point: verified-state table, the upgrade-gate rule, repo map, **every server-core patch with file locations**, and the hard-won gotchas |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | System shape, request lifecycle, crash-recovery machinery, exactly-once proof layers, streaming, security, extension points |
 | **[docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md)** | Every component, complete env-var reference, endpoint/agent reference, all suites in detail, CDK flags, change conventions |
-| **[docs/RUNBOOK.md](docs/RUNBOOK.md)** | Local / emulator / real-AWS deploys, upgrade procedure, chaos drills, troubleshooting table, security posture |
+| **[docs/RUNBOOK.md](docs/RUNBOOK.md)** | Local / emulator / real-AWS deploys, upgrade procedure, chaos drills, rotation, multi-key, troubleshooting, security posture |
 | **[docs/HANDOFF.md](docs/HANDOFF.md)** | Decision log and bug archaeology — the "why"s that aren't in the code |
-| **[docs/FEATURE-VERIFICATION.md](docs/FEATURE-VERIFICATION.md)** | Every LangSmith-inventory item mapped to its verification evidence, plus all three verification passes |
+| **[docs/FEATURE-VERIFICATION.md](docs/FEATURE-VERIFICATION.md)** | Every LangSmith-inventory item mapped to its verification evidence, across all four verification passes |
 
 ---
 
-## Known limitations & queued work
+## Scope decisions
 
-**Everything that can be built and tested locally is built and tested.** The
-only open items are blocked on credentials or hardware:
+Everything that can be built and verified without your AWS account is built and verified. These are deliberate scope decisions, not pending work:
 
-- **Real-AWS live-fire** — autoscaling (CPU + requests + backlog step
-  scaling) and RDS Multi-AZ failover are wired and synth-verified, but need
-  to be exercised in an actual AWS account (`aws login` + `cdk deploy`).
-- **LangSmith licensed-image parity** — the same suites are ready to run
-  against the licensed production image once a key is available.
-
-Design notes worth knowing:
-
-- The emulator config (`aegra.aws.emulator.json`) omits the semantic store
-  index because FloCI's RDS has no `pgvector`. Real AWS uses
-  `aegra.aws.json` with the index on (Bedrock Titan embeddings).
-- MCP interrupts use an explicit `_resume` argument rather than the MCP
-  elicitation primitive: the endpoint is stateless Streamable HTTP, so the
-  server cannot initiate a request to the client. The round-trip is complete
-  — interrupt payload, `resume_hint`, and resume — just client-initiated.
-- Multi-tenancy is **optional and off by default** (single-company use). Set
-  `PLATFORM_API_KEYS` to enable per-key isolation.
+- **Real-AWS live-fire** (autoscaling, Multi-AZ failover) needs an actual AWS account — the wiring is deployed and synth-verified; only `aws login` is missing. `docs/RUNBOOK.md` has the exact procedure.
+- **LangSmith licensed-image parity** — the same suites are ready to run against the licensed production image the moment a key is available.
+- **Multi-tenancy is opt-in, off by default.** This is internal company tooling; single-key shared access is the default. Set `PLATFORM_API_KEYS` for per-key isolation.
+- **MCP interrupts are client-initiated**, not the MCP *elicitation* primitive: the endpoint is stateless Streamable HTTP, so the server cannot initiate a request back to the client. The round-trip is complete (interrupt payload → `resume_hint` → `_resume`), just client-initiated.
+- **The emulator config omits the semantic store index** because FloCI's RDS has no `pgvector`. Real AWS uses `aegra.aws.json` with the index on.
 
 ---
 
