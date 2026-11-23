@@ -17,7 +17,8 @@ derivative works with attribution) from:
 - Repository: https://github.com/aegra/aegra
 - Path vendored: `libs/aegra-api/`
 - Upstream commit: `2693066413dfafce3fd21bf581f10bd2495b8dd3`
-- Upstream license: Apache-2.0 (see `LICENSE` in this directory)
+- Upstream original license: Apache-2.0; MIT redistribution granted by the
+  upstream owner (see the repository root `LICENSE`)
 - Design influences also credited in `docs/ARCHITECTURE.md`:
   - The LangSmith Agent Server study (`../agent-server-study/`) for the
     public API contract (50 paths / 64 operations) and feature map.
