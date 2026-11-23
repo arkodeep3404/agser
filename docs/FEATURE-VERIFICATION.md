@@ -206,3 +206,27 @@ Everything in the PDF inventory is now built, running, and green — on the
 latest dependency set, on both our platform and the official reference,
 including crash-kill recovery on AWS infrastructure with exactly-once
 guarantees.
+
+
+## Re-verification record (post-foolproofing, second full pass)
+
+After the foolproofing audit fixes (commit `bad5e97`), the entire campaign
+was re-run from scratch:
+
+| Check | Result |
+|---|---|
+| Upgrade gate (fresh rebuild + all four suites) | **GREEN** |
+| Feature conformance, STRICT mode (ours) | **63/63 PASS** — regressions now FAIL instead of silently SKIP |
+| Feature conformance, PARITY mode (official build :8124) | **63/63 PASS** |
+| HITL parity (official build, LLM-free) | **22 PASS, 0 FAIL** |
+| AWS verify suite through the ALB (current image via ECR) | **GREEN** |
+| AWS chaos drill v2: `ecs stop-task` mid-run | **RECOVERED in 50s, prep EXACTLY ONCE** |
+| AES encryption at rest | **2,036 encrypted checkpoint writes since rebuild** |
+| MCP endpoint | 5 tools listed, tools/call verified |
+| A2A endpoint | message/send round-trip verified |
+| Webhook HMAC | signature VALID, status success |
+| Real deep agent (live LLM) | research agent ran; **165 new Langfuse events** ingested from that single run (8,617 → 8,780) |
+
+Two audit BLOCKERs were found and fixed in this pass (CI lockfile
+gitignored; invalid RDS class in cdk.json) — the audit → fix → full
+re-run loop is the process working as designed.
