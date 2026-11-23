@@ -24,7 +24,7 @@ set -uo pipefail
 
 BASE=${BASE:-http://127.0.0.1:8123}
 API_KEY=${PLATFORM_API_KEY:-dev-key}
-RUN_LLM=${RUN_LLM:-1}
+if [ -z "${OPENROUTER_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then RUN_LLM=0; else RUN_LLM=${RUN_LLM:-1}; fi
 RESTART_CMD=${RESTART_CMD:-docker compose restart server}
 TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT

@@ -103,3 +103,9 @@ builds, tests, publishes and rolls out to the already-running platform.
 - To tear the pipeline down without touching the platform:
   `npx cdk destroy AgserCicd` (the ECR images and the ECS service are
   unaffected — the pipeline only ever *pushes* to them).
+
+
+> Note: the CodeBuild pipeline runs the four suites against the compose
+> stack (our server) only. The official-parity suites run in the GitHub
+> Actions workflow (`.github/workflows/ci.yml`) — CodeBuild does not build
+> the official image.

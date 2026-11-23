@@ -69,7 +69,7 @@ export class CicdStack extends cdk.Stack {
         // CDK 2.180 ships AL2023 images under versioned constants; _5 is
         // the newest non-EOL tag available in this library version.
         buildImage: codebuild.LinuxBuildImage.AMAZON_LINUX_2023_5,
-        computeType: codebuild.ComputeType.SMALL,
+        computeType: codebuild.ComputeType.MEDIUM,
         privileged: true,
       },
       environmentVariables: {

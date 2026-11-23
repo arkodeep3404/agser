@@ -34,8 +34,8 @@ including killing ECS tasks mid-run.
 | Suite | Command | Coverage | Last result |
 |---|---|---|---|
 | Platform smoke | `./scripts/verify.sh` | health, auth, threads, sync/stream/bg runs, state, crons, store+semantic, /metrics, HITL interrupt→resume | PASS (local + through AWS ALB) |
-| Feature conformance | `./scripts/test-features.sh` | 59 numbered checks (§1–11,14 of the LangSmith inventory): assistants CRUD/versions/rollback, threads/state/fork/copy/prune, runs incl. double-texting reject 409, streaming modes, HITL, store, crons, auth, protocols | **ALL PASS on BOTH our server (:8123) and the official public build (:8124)** |
-| HITL lifecycle | `./scripts/test-hitl.sh` | 22 test groups / 29 checks: pause, approve, reject, restart survival, state surgery, double-resume, delete-during-pause, cancel, fork-to-gate, complex-agent approve+reject with zero duplicate tool calls | 29/29 ours; official 28/29 (one documented divergence: ours rejects resume-without-interrupt with 4xx, official silently accepts) |
+| Feature conformance | `./scripts/test-features.sh` | ~60 numbered checks across the LangSmith inventory (§1–11,14): assistants CRUD/versions/rollback, threads/state/fork/copy/prune, runs incl. double-texting reject 409, streaming modes, HITL, store, crons, auth, protocols. STRICT by default (regressions FAIL; `PARITY=1` keeps documented official divergences as SKIPs) | **ALL PASS on BOTH our server (:8123) and the official public build (:8124)** |
+| HITL lifecycle | `./scripts/test-hitl.sh` | 22 test groups (~30 checks): pause, approve, reject, restart survival, state surgery, double-resume, delete-during-pause, cancel, fork-to-gate, complex-agent approve+reject with zero duplicate tool calls | 29/29 ours; official 28/29 (one documented divergence: ours rejects resume-without-interrupt with 4xx, official silently accepts) |
 | Failure injection | `./scripts/test-failures.sh` | F1 server-kill mid-run → reaper recovery → prep EXACTLY ONCE; F2 client network drop → run survives → stream rejoins; F3 cancel; F4 4-parallel all exactly-once | PASS |
 | Upgrade gate | `./scripts/upgrade-check.sh` | rebuilds image with fresh deps + runs verify + features + failures + HITL | GREEN |
 
@@ -63,6 +63,7 @@ exists as the parity reference — the feature suite must stay green on both.
 
 ```
 AGENTS.md               ← you are here (entry point)
+  (see docs/ for ARCHITECTURE / DEVELOPER-GUIDE / RUNBOOK / HANDOFF)
 LICENSE                 ← the ONLY license: standard MIT
 README.md               ← human-facing overview + quickstart
 docker-compose.yml      ← local stack: postgres(pgvector) redis fake-embed server :8123
@@ -86,7 +87,7 @@ docs/                   ← FEATURE-VERIFICATION (LangSmith inventory cross-chec
                           ARCHITECTURE, RUNBOOK, DEVELOPER-GUIDE (read next)
 .github/workflows/ci.yml← CI: all suites + official parity + cdk synth
 .env                    ← local secrets (gitignored): OpenRouter key etc.
-.env.example            ← every knob documented
+.env.example            ← every knob documented (OpenRouter vars included)
 server/requirements.lock.txt ← last-known-good dep set (reference only, NOT enforced)
 ```
 

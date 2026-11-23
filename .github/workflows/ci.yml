@@ -25,10 +25,8 @@ jobs:
           done
           curl -sf http://127.0.0.1:8123/ok
 
-      - name: Platform conformance (verify.sh)
-        run: ./scripts/verify.sh
-        env:
-          RUN_LLM_DEEP_AGENT: "0"
+      - name: Platform conformance (verify.sh, LLM-free)
+        run: RUN_LLM_DEEP_AGENT=0 ./scripts/verify.sh
 
       - name: Official-contract feature conformance (test-features.sh)
         run: ./scripts/test-features.sh
@@ -42,9 +40,13 @@ jobs:
       - name: Parity vs official public build
         run: |
           docker compose --profile official up -d --build
-          sleep 40
-          BASE=http://127.0.0.1:8124 ./scripts/test-features.sh
-          RUN_LLM=0 RESTART_CMD="docker compose restart official" BASE=http://127.0.0.1:8124 ./scripts/test-hitl.sh
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8124/ok && break
+            sleep 3
+          done
+          curl -sf http://127.0.0.1:8124/ok
+          PARITY=1 BASE=http://127.0.0.1:8124 ./scripts/test-features.sh
+          RUN_LLM=0 PARITY=1 RESTART_CMD="docker compose restart official" BASE=http://127.0.0.1:8124 ./scripts/test-hitl.sh
 
       - name: CDK synth (AWS infra is always template-valid)
         working-directory: deploy/cdk

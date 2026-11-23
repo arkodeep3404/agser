@@ -13,7 +13,22 @@ TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT
 
 AUTH=(-H "x-api-key: ${API_KEY}" -H 'Content-Type: application/json')
+# STRICT (default): tolerance-skips become FAILs — a regression on OUR server
+# must never silently pass. PARITY=1 (CI job against the official build)
+# keeps the documented divergences as SKIPs.
+STRICT=${STRICT:-1}
+if [ "${PARITY:-0}" = "1" ]; then STRICT=0; fi
+
 PASS=0; FAIL=0; FAILED_FEATURES=()
+
+skip_or_fail() {  # <name> [detail] — skip only in parity mode
+  if [ "${STRICT}" = 1 ]; then
+    FAIL=$((FAIL+1)); FAILED_FEATURES+=("$1")
+    printf '  \033[31mFAIL\033[0m %s %s\n' "$1" "${2:+— ${2}}"
+  else
+    printf '  \033[33mSKIP\033[0m %s %s\n' "$1" "${2:+— ${2}}"
+  fi
+}
 
 t() {   # t "<feature name (PDF)>" "<ok|skip>" [detail]
   local name="$1" verdict="$2" detail="${3:-}"
@@ -126,7 +141,8 @@ t "2.12 Copy thread (our extension)" "$([ -n "${COPY}" ] && [ "${COPY}" != "None
 
 PRUNE_TID=$(api -X POST "${BASE}/threads" "${AUTH[@]}" -d '{}' | jqpy 'd["thread_id"]')
 CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads/prune" "${AUTH[@]}" -d "{\"thread_ids\":[\"${PRUNE_TID}\"],\"strategy\":\"delete\"}")
-t "2.13 Prune threads (delete strategy)" "$([ "$CODE" = 200 ] && echo ok || echo skip)" "HTTP ${CODE}"
+if [ "$CODE" = 200 ]; then t "2.13 Prune threads (delete strategy)" ok
+else skip_or_fail "2.13 Prune threads (delete strategy)" "HTTP ${CODE}"; fi
 
 api -X DELETE "${BASE}/threads/${CUSTOM_ID}" "${AUTH[@]}" -o /dev/null
 CODE=$(api -o /dev/null -w '%{http_code}' "${BASE}/threads/${CUSTOM_ID}" "${AUTH[@]}")
@@ -153,7 +169,8 @@ NB=$(echo "$B" | jqpy 'len(d)' 2>/dev/null)
 t "3.5 Batch runs (our extension)" "$([ "${NB:-0}" = 2 ] 2>/dev/null && echo ok || echo fail)" "created ${NB:-none}"
 
 CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads" "${AUTH[@]}" -d "{\"thread_id\":\"$(python3 -c 'import uuid;print(uuid.uuid4())')\",\"if_not_exists\":\"create\",\"metadata\":{}}")
-t "3.6 if_not_exists create-on-first-run semantics" "$([ "$CODE" = 200 ] && echo ok || echo skip)" "HTTP ${CODE}"
+if [ "$CODE" = 200 ]; then t "3.6 if_not_exists create-on-first-run semantics" ok
+else skip_or_fail "3.6 if_not_exists create-on-first-run semantics" "HTTP ${CODE}"; fi
 
 # 3.7 join run
 RID=$(api -X POST "${BASE}/threads/${TID}/runs" "${AUTH[@]}" -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"joinme"}]}}' | jqpy 'd["run_id"]')
@@ -179,17 +196,20 @@ t "3.10 Double-texting: enqueue (default)" "$([ "$CODE" = 200 ] && echo ok || ec
 TD3=$(api -X POST "${BASE}/threads" "${AUTH[@]}" -d '{}' | jqpy 'd["thread_id"]')
 api -X POST "${BASE}/threads/${TD3}/runs" "${AUTH[@]}" -d '{"assistant_id":"sleepy","input":{"messages":[{"role":"user","content":"first"}]}}' > /dev/null
 CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads/${TD3}/runs" "${AUTH[@]}" -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"second"}]},"multitask_strategy":"reject"}')
-t "3.11 Double-texting: reject" "$([ "$CODE" = 409 ] && echo ok || echo skip)" "HTTP ${CODE} (409 expected)"
+if [ "$CODE" = 409 ]; then t "3.11 Double-texting: reject → 409" ok
+else skip_or_fail "3.11 Double-texting: reject → 409" "HTTP ${CODE} (409 expected)"; fi
 
 # 3.12 double-texting: interrupt strategy
 TD4=$(api -X POST "${BASE}/threads" "${AUTH[@]}" -d '{}' | jqpy 'd["thread_id"]')
 api -X POST "${BASE}/threads/${TD4}/runs" "${AUTH[@]}" -d '{"assistant_id":"sleepy","input":{"messages":[{"role":"user","content":"first"}]}}' > /dev/null
 CODE=$(api -o /dev/null -w '%{http_code}' -X POST "${BASE}/threads/${TD4}/runs/wait" "${AUTH[@]}" -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"second"}]},"multitask_strategy":"interrupt"}')
-t "3.12 Double-texting: interrupt" "$([ "$CODE" = 200 ] && echo ok || echo skip)" "HTTP ${CODE}"
+if [ "$CODE" = 200 ]; then t "3.12 Double-texting: interrupt" ok
+else skip_or_fail "3.12 Double-texting: interrupt" "HTTP ${CODE}"; fi
 
 # 3.13 recursion limit respected
 ERR=$(api -X POST "${BASE}/threads/${TID}/runs/wait" "${AUTH[@]}" -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"x"}]},"config":{"recursion_limit":1}}')
-t "3.13 Recursion limit enforced" "$(echo "${ERR}" | jqpy 'd.get("__error__") is not None' | grep -q True && echo ok || echo skip)"
+if echo "${ERR}" | jqpy 'd.get("__error__") is not None' | grep -q True; then t "3.13 Recursion limit enforced" ok
+else skip_or_fail "3.13 Recursion limit enforced" "no __error__ at recursion_limit=1"; fi
 
 # ----------------------------------------------------------------- 4. STREAMING
 sec "4. Streaming"

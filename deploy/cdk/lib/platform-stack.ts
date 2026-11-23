@@ -59,7 +59,8 @@ export class PlatformStack extends cdk.Stack {
     const desiredCount = ctx('desiredCount', 2) as number;
     const cpu = ctx('cpu', 1024) as number;
     const memoryMiB = ctx('memoryMiB', 4096) as number;
-    const dbInstanceClass = ctx('dbInstanceClass', 'burstable4.small') as string;
+    // t4g.* is the valid RDS class family (db.t4g.small).
+    const dbInstanceClass = ctx('dbInstanceClass', 't4g.small') as string;
     const dbMultiAz = ctx('dbMultiAz', true) as boolean;
     // SIMULATION ONLY (FloCI/local emulator): an explicit DB password so the
     // emulator can start its real Postgres container. Leave unset in prod —
@@ -112,6 +113,19 @@ export class PlatformStack extends cdk.Stack {
     const openrouterKey = new secretsmanager.Secret(this, 'OpenrouterKey', {
       secretName: 'agser/openrouter-api-key',
       description: 'OpenRouter API key (or any OpenAI-compatible gateway)',
+    });
+    // agser (ours): AES checkpoint encryption in production — restore of the
+    // official LANGGRAPH_AES_KEY contract on AWS (32-char generated key).
+    const aesKey = new secretsmanager.Secret(this, 'AesKey', {
+      secretName: 'agser/aes-key',
+      description: 'LANGGRAPH_AES_KEY — checkpoint encryption at rest',
+      generateSecretString: {
+        excludePunctuation: true,
+        excludeUppercase: false,
+        excludeLowercase: false,
+        includeSpace: false,
+        passwordLength: 32,
+      },
     });
 
     // ---------------------------------------------------------------- RDS Postgres 16 — Multi-AZ with automatic failover
@@ -336,6 +350,7 @@ export class PlatformStack extends cdk.Stack {
         PLATFORM_API_KEY: ecs.Secret.fromSecretsManager(platformApiKey),
         ANTHROPIC_API_KEY: ecs.Secret.fromSecretsManager(anthropicKey),
         OPENROUTER_API_KEY: ecs.Secret.fromSecretsManager(openrouterKey),
+        LANGGRAPH_AES_KEY: ecs.Secret.fromSecretsManager(aesKey),
       },
     });
     container.addUlimits({

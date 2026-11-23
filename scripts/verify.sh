@@ -100,9 +100,16 @@ curl -sf -m 10 -X DELETE "${BASE}/runs/crons/${CID}" "${AUTH[@]}" -o /dev/null |
 ok "cron lifecycle ok"
 
 say "store: put → search"
-curl -sf -m 10 -X PUT "${BASE}/store/items" "${AUTH[@]}" \
-  -d '{"namespace":["verify","probe"],"key":"k","value":{"ok":true}}' -o /dev/null \
-  || fail "store put failed"
+STORE_PUT=""
+for attempt in 1 2 3; do
+  if curl -sf -m 10 -X PUT "${BASE}/store/items" "${AUTH[@]}" \
+    -d '{"namespace":["verify","probe"],"key":"k","value":{"ok":true}}' -o /dev/null; then
+    STORE_PUT=ok; break
+  fi
+  say "  store put attempt ${attempt} failed — retrying (embeddings service settling?)"
+  sleep 3
+done
+[ "${STORE_PUT}" = ok ] || fail "store put failed after 3 attempts"
 curl -sf -m 10 -X POST "${BASE}/store/items/search" "${AUTH[@]}" \
   -d '{"namespace_prefix":["verify"]}' -o "${TMP}/store.json" || fail "store search failed"
 python3 - "${TMP}/store.json" <<'PY'
@@ -158,7 +165,7 @@ score = hits[0].get("score")
 print(f"  found by meaning (score={score:.3f})" if score is not None else "  found by meaning")
 PY
 
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+if [ "${RUN_LLM_DEEP_AGENT:-1}" = "1" ] && { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
   say "POST /threads/{id}/runs/wait  (graph: research, real deep agent)"
   curl -sf -m 180 -X POST "${BASE}/threads/${TID}/runs/wait" "${AUTH[@]}" \
     -d '{"assistant_id":"research","input":{"messages":[{"role":"user","content":"In one sentence: what can our billing-api do? Use the catalog tool, then stop."}]}}' \
@@ -170,7 +177,7 @@ print(f"  deep agent replied: {d['messages'][-1]['content'][:200]}")
 PY
 else
   say "deep agent (graph: research)"
-  ok "skipped — set ANTHROPIC_API_KEY to exercise it"
+  ok "skipped — set OPENROUTER_API_KEY (and MODEL_PROVIDER=openrouter) to exercise it"
 fi
 
 say "PASS — platform verified: health, auth, threads, runs (sync/stream/bg), state, crons, store, metrics"

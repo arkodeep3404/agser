@@ -6,6 +6,7 @@ __pycache__/
 dist/
 cdk.out/
 package-lock.json
+!deploy/cdk/package-lock.json
 
 # Secrets / local
 .env

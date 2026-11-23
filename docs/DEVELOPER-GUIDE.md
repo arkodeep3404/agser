@@ -143,11 +143,11 @@ exit on any FAIL.
   probe, HITL interrupt→resume with prep-exactly-once assert. Deep-agent
   section skipped unless `ANTHROPIC_API_KEY` set (research agent tested
   manually with OpenRouter).
-- **test-features.sh** — 59 checks against the official inventory; runs
+- **test-features.sh** — ~60 checks against the official inventory; STRICT by default (regression = FAIL), `PARITY=1` for official-build runs (documented divergences stay SKIP); runs
   identically against the official build for parity. Uses UUID thread ids
   (official 422s non-UUID), POST history with limit, `if_not_exists`
   create semantics.
-- **test-hitl.sh** — H1–H13 (22 groups): every HITL edge case; LLM
+- **test-hitl.sh** — H1–H13 (22 groups, ~30 checks); LLM sections auto-skip with no provider key: every HITL edge case; LLM
   sections gated by `RUN_LLM=1` (default on; CI uses 0);
   `RESTART_CMD` hook points at the right container per target.
 - **test-failures.sh** — F1 server-kill (via `RESTART_CMD`), F2 client

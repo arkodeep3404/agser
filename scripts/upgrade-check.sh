@@ -41,6 +41,8 @@ if [ "${REBUILD}" = 1 ]; then
   printf '%s== Rebuilding server image (fresh dependency resolution) ==%s\n' "$BOLD" "$OFF"
   docker compose build server >/dev/null 2>&1 || { echo "${RED}image build failed${OFF}"; exit 1; }
   docker compose up -d --force-recreate server >/dev/null 2>&1
+  # reconcile every service (embeddings/webhook deps) — avoids settle races
+  docker compose up -d >/dev/null 2>&1
   sleep 45
   curl -sf -m 10 http://127.0.0.1:8123/ok >/dev/null || { echo "${RED}server did not come up${OFF}"; exit 1; }
 fi
