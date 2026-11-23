@@ -79,7 +79,9 @@ extensions/app.py       ← OUR endpoints: /ok /metrics /threads/count /runs/bat
                           /threads/{id}/copy /mcp /a2a/{id} agent-card + CW publisher
 scripts/                ← verify, test-features, test-hitl, test-failures,
                           test-workflow (46-check multi-gate crash suite),
+                          test-v2-stream (v2 protocol stream), test-multitenancy,
                           check-config-sync, aws-restart-tasks (crash hook),
+                          rotate-webhook-secret,
                           upgrade-check, deploy-image, local-up/down (+logs)
 deploy/cdk/             ← AWS infra (PlatformStack) + optional CicdStack (agser:cicd)
 deploy/cicd/            ← CodeBuild buildspec + CodePipeline README
@@ -143,18 +145,25 @@ Langfuse ClickHouse was remapped to 18123 because 8123 is ours).
 
 ## 8. Queued work (pick up here)
 
-1. Real-AWS deploy: needs `aws login` credentials; then
-   `cdk deploy` + `./scripts/deploy-image.sh` (Mumbai). Live-fire the
-   backlog autoscaling + Multi-AZ failover there.
-2. LangSmith license key (owner will provide): run the same suites against
-   the licensed production image for the final side-by-side.
-3. Minor: full MCP elicitation for interrupts (currently surfaces thread id
-   for API resume); v2 thread-stream e2e client test; webhook secret
-   rotation helper; `after_seconds` delayed runs (inventory §3); re-add
-   `store.index` to `aegra.aws.json` when deploying to real RDS (pgvector
-   exists there; it is absent on FloCI, hence the current omission).
-4. Optional: CDK dashboard for the custom metrics; RDS Proxy for pool
-   limits at high replica counts.
+**Everything buildable locally is built and tested.** What remains is
+blocked on credentials or hardware, not on code:
+
+1. **Real-AWS live-fire** — needs `aws login` credentials. Then
+   `cdk deploy` + `./scripts/deploy-image.sh` (Mumbai), and exercise:
+   backlog autoscaling (the `AgserPlatform/PendingRuns` step policy),
+   RDS Multi-AZ failover, and the chaos drill against real ECS.
+   Everything is wired; only the account is missing.
+2. **LangSmith license key** (owner will provide) — run the same suites
+   against the licensed production image for the final side-by-side.
+
+Optional polish, not blockers: a CDK dashboard for the custom metrics;
+RDS Proxy if replica counts ever exceed the Postgres connection budget.
+
+Completed in the final pass (was previously listed here): semantic store
+index for real AWS (now in `aegra.aws.json`, with an emulator-specific
+`aegra.aws.emulator.json` for FloCI), MCP interrupt→resume round-trip,
+`after_seconds` delayed runs, webhook secret rotation, v2 stream e2e test,
+and optional multi-key (tenant-style) isolation.
 
 ## 9. Things that bit us — learn from them
 
@@ -200,3 +209,21 @@ Langfuse ClickHouse was remapped to 18123 because 8123 is ours).
   objects, not dicts. `state["messages"][-1]["content"]` raises
   `'AIMessage' object is not subscriptable`. Always use the `_content()`
   helper pattern (`agents/ping`, `agents/approval`, `agents/workflow`).
+- **Liveness is not readiness**: `/ok` returns 200 before the embeddings
+  path is warm, so a store write can fail for the first seconds after a
+  rebuild. The gate now polls a real store write before running suites.
+  Any new dependency that warms lazily needs the same treatment.
+- **v2 payload channels need v2-native runs**: `values`/`messages` events on
+  `/threads/{id}/stream/events` are produced for runs started via
+  `POST /threads/{id}/commands` → `run.start`. Runs started through the v1
+  `POST /runs` only surface `lifecycle` on the v2 stream. Also, the v2
+  session attaches via a run-lister poll, so an instant graph can finish
+  between polls — the e2e test retries the cycle (up to 3×) rather than
+  flaking.
+- **`after_seconds` has two claim paths**: the reaper (`lease_reaper`) and
+  the Redis-outage fallback (`WorkerExecutor._poll_postgres`). Both must
+  honour `_not_before`; a delayed run must never be picked up early.
+- **Docker resets happen**: this stack has been wiped mid-session (all
+  containers/volumes gone). The repo is the source of truth — `docker
+  compose up -d --build` restores everything, and `./scripts/upgrade-check.sh`
+  proves it. Nothing of value lives only in Docker volumes.

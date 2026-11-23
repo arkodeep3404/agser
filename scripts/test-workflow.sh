@@ -211,12 +211,17 @@ ENRICH_AFTER=$(stage_results_count "$T")
 t "W4.6 stage_results preserved across crash" "$([ "${ENRICH_AFTER:-0}" = "${ENRICH_BEFORE}" ] && echo ok || echo fail)" "before=${ENRICH_BEFORE} after=${ENRICH_AFTER}"
 
 # verify the interrupt payload still shows gate 2
-GATE2=$(api "${BASE}/threads/$T/state" "${AUTH[@]}" | py "
+GATE2=""
+for i in $(seq 1 20); do
+  GATE2=$(api "${BASE}/threads/$T/state" "${AUTH[@]}" | py "
 import json, sys
 d = json.load(sys.stdin)
 gates = [i.get('value', {}).get('gate') for t in (d.get('tasks') or []) for i in t.get('interrupts', [])]
 print(2 in gates)
 ")
+  [ "$GATE2" = True ] && break
+  sleep 2
+done
 t "W4.7 interrupt payload still shows gate 2" "$([ "$GATE2" = True ] && echo ok || echo fail)" "gate2=${GATE2}"
 
 # now resume — the workflow should continue from gate 2, NOT restart

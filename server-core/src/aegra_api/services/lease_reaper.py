@@ -4,15 +4,19 @@ Periodically scans the runs table for rows where
 ``status='running' AND lease_expires_at < now()``. It atomically either
 returns them to ``pending`` or marks their retry budget exhausted, then
 re-enqueues only retryable run IDs.
+
+# agser (ours): it also submits runs created with ``after_seconds``, but only
+once the ``_not_before`` due time stored in ``execution_params`` has passed.
 """
 
 import asyncio
 import contextlib
+import time
 from datetime import UTC, datetime, timedelta
 
 import structlog
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import Float, and_, or_, select, update
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
@@ -112,11 +116,28 @@ class LeaseReaper:
             )
             crashed = [row[0] for row in crashed_result.fetchall()]
 
+            # agser (ours): official delayed runs. A pending run whose
+            # ``_not_before`` (epoch seconds, written by run_preparation) is still
+            # in the future is waiting on purpose, not stuck: it matches neither
+            # branch below, so it is not re-enqueued early and never charges the
+            # crash-retry budget (that path only covers status='running' rows).
+            not_before = RunORM.execution_params["_not_before"].astext.cast(Float)
             stuck_result = await session.execute(
                 select(RunORM.run_id).where(
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
-                    RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
+                    or_(
+                        # (a) ordinary pending run that never reached a worker.
+                        # ``IS NULL`` matches a missing key as well as a JSON null,
+                        # so NULL comparisons in (b) cannot drop these rows.
+                        and_(
+                            RunORM.execution_params["_not_before"].astext.is_(None),
+                            RunORM.created_at
+                            < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
+                        ),
+                        # (b) delayed run whose due time has arrived.
+                        not_before <= time.time(),
+                    ),
                 )
             )
             stuck_pending = [row[0] for row in stuck_result.fetchall()]

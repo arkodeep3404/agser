@@ -45,6 +45,21 @@ if [ "${REBUILD}" = 1 ]; then
   docker compose up -d >/dev/null 2>&1
   sleep 45
   curl -sf -m 10 http://127.0.0.1:8123/ok >/dev/null || { echo "${RED}server did not come up${OFF}"; exit 1; }
+  # Liveness (/ok) is not readiness: the embeddings path used by the store is
+  # warmed lazily, and the first write can fail while the container settles.
+  # Poll a real store write before handing control to the suites.
+  printf 'waiting for functional readiness (store write)'
+  READY=0
+  for i in $(seq 1 20); do
+    if curl -sf -m 10 -X PUT http://127.0.0.1:8123/store/items \
+        -H "x-api-key: ${PLATFORM_API_KEY:-dev-key}" -H 'Content-Type: application/json' \
+        -d '{"namespace":["gate","ready"],"key":"probe","value":{"ok":true}}' -o /dev/null; then
+      READY=1; break
+    fi
+    printf '.'; sleep 3
+  done
+  echo
+  [ "$READY" = 1 ] || echo "${RED}warning: store write still failing; suites may report it${OFF}"
 fi
 
 FAILED=0
@@ -54,6 +69,8 @@ run_suite "feature conformance" ./scripts/test-features.sh || FAILED=1
 run_suite "failure injection" ./scripts/test-failures.sh || FAILED=1
 run_suite "human-in-the-loop lifecycle" ./scripts/test-hitl.sh || FAILED=1
 run_suite "multi-gate workflow crash-recovery" ./scripts/test-workflow.sh || FAILED=1
+run_suite "v2 thread event stream" ./scripts/test-v2-stream.sh || FAILED=1
+run_suite "multi-key isolation" ./scripts/test-multitenancy.sh || FAILED=1
 
 printf '\n%s== UPGRADE GATE: %s ==%s\n' "$BOLD" "$([ $FAILED = 0 ] && echo GREEN || echo BLOCKED)" "$OFF"
 for r in "${RESULTS[@]}"; do printf '  %s\n' "$r"; done

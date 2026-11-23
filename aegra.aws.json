@@ -30,5 +30,14 @@
   },
   "http": {
     "app": "./extensions/app.py:app"
+  },
+  "store": {
+    "index": {
+      "embed": "bedrock:amazon.titan-embed-text-v2:0",
+      "dims": 1024,
+      "fields": [
+        "$"
+      ]
+    }
   }
 }

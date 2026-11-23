@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import Float, or_, select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -391,12 +391,26 @@ class WorkerExecutor(BaseExecutor):
 
     @staticmethod
     async def _poll_postgres() -> str | None:
-        """Pick the oldest pending, unclaimed run from Postgres."""
+        """Pick the oldest due, pending, unclaimed run from Postgres.
+
+        agser (ours): honours ``after_seconds`` delayed runs. This poll is the
+        fallback path used when Redis BLPOP is unavailable; without the
+        ``_not_before`` guard a delayed run would be picked up early during a
+        broker outage. A missing key yields SQL NULL, so ``NULL <= now`` is
+        never true — normal runs are unaffected because they carry no key.
+        """
+        import time as _time
+
+        not_before = RunORM.execution_params["_not_before"].astext.cast(Float)
         maker = _get_session_maker()
         async with maker() as session:
             run_id = await session.scalar(
                 select(RunORM.run_id)
-                .where(RunORM.status == "pending", RunORM.claimed_by.is_(None))
+                .where(
+                    RunORM.status == "pending",
+                    RunORM.claimed_by.is_(None),
+                    or_(not_before.is_(None), not_before <= _time.time()),
+                )
                 .order_by(RunORM.created_at.asc())
                 .limit(1)
             )

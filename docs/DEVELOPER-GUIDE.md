@@ -28,7 +28,9 @@ For AI agents continuing this project. Read `AGENTS.md` first.
 | File | Used by | Contents |
 |---|---|---|
 | `aegra.json` | local compose | graphs registry (5), `auth.path` → `./auth.py:platform_auth`, `http.app` → `./extensions/app.py:app`, `store.index` (pgvector semantic search, `openai:` provider string + offline fake server via `OPENAI_BASE_URL`), `webhooks.url` policy (allows `host.docker.internal` for the e2e webhook test) |
-| `aegra.aws.json` | AWS task def (`AEGRA_CONFIG`) | same graphs/auth/http; store index points at `bedrock:amazon.titan-embed-text-v2:0` (real RDS pgvector; disabled logic: FloCI's RDS lacks pgvector so index was removed for the emulator run — re-add `store.index` there if you test semantic search on FloCI, or leave AWS prod with Bedrock) |
+| `aegra.aws.json` | AWS task def (`AEGRA_CONFIG`) — **real AWS** | same graphs/auth/http; `store.index` uses `bedrock:amazon.titan-embed-text-v2:0` (RDS supports pgvector, embeddings stay in-account) |
+| `aegra.aws.emulator.json` | AWS task def on **FloCI** (`-c agser:configFile=...`) | identical but **no** `store.index` — the emulator's RDS image has no `pgvector`, so the index would fail on boot |
+| `langgraph.json` | the `official` parity build | same graphs/auth/store for the upstream server on :8124 |
 
 Graph registration supports both `{path, description}` objects and plain
 `"./path.py:symbol"` strings; factories export `make(config)` — the server
@@ -42,10 +44,18 @@ work and bad credentials can't crash boot.
   `Authorization: Bearer`). Local default `dev-key`. AWS: Secrets Manager
   `agser/platform-api-key`. `auth.py` 500s if unset (never serve open) and
   401s on mismatch (`hmac.compare_digest`).
+- `PLATFORM_API_KEYS` — **optional multi-key mode**: `keyA:alice,keyB:bob`
+  (or a JSON object). Each key authenticates as its own identity, and the
+  core scopes every resource by `user_id`, so identities are fully isolated
+  (tenant-style). Empty = single shared identity (default). Verified by
+  `scripts/test-multitenancy.sh`.
 - `LANGGRAPH_AES_KEY` — 16/24/32-byte key (or any string, SHA-256-derived)
   enabling AES-256-GCM checkpoint encryption (see §6 AGENTS).
 - `AGSER_WEBHOOK_SECRET` — enables `X-Agser-Signature` HMAC-SHA256 on
   webhook deliveries.
+- `AGSER_WEBHOOK_SECRET_PREVIOUS` — rotation window: deliveries then also
+  carry `X-Agser-Signature-Previous`, so receivers still on the old secret
+  keep verifying. See `scripts/rotate-webhook-secret.sh`.
 
 ### Datastores
 - `DATABASE_URL` (our core) / `DATABASE_URI` (official build) — Postgres.
@@ -106,7 +116,7 @@ custom routes; this bit us once).
 | `POST /threads/count` | official count-by-filter (was missing in core) |
 | `POST /runs/batch` | official batch create; per-item `__error__` objects |
 | `POST /threads/{id}/copy` | metadata + latest checkpoint tuple copy |
-| `POST /mcp` | stateless Streamable HTTP: initialize / notifications → 202 / tools/list (one tool per graph, real input schema via `_extract_graph_schemas`) / tools/call (stateless run + wait; interrupted runs surface thread id) |
+| `POST /mcp` | stateless Streamable HTTP: initialize / notifications → 202 / tools/list (one tool per graph, real input schema via `_extract_graph_schemas`) / tools/call. **HITL round-trip**: two reserved arguments — `_thread_id` (continue an existing thread) and `_resume` (the resume payload, e.g. `{"approved": true}` or `{"decisions":[{"type":"approve"}]}`). An interrupted call returns the real interrupt payload, the `thread_id`, the `run_id` and a `resume_hint` showing the exact next call. Completed calls always include `thread_id` + `run_id` so a client can chain calls. |
 | `GET /.well-known/agent-card.json` | A2A card (optional `assistant_id` param) |
 | `POST /a2a/{assistant_id}` | `message/send` → stateless run → A2A Message reply |
 | lifespan `_cw_publish` | backlog metrics publisher (above) |
@@ -163,9 +173,20 @@ exit on any FAIL.
   assert the thread is still at gate 2 with `side_effects == [intake,
   enrich]` and `stage_results` intact, then resume and assert every stage
   ran exactly once. W6 does three sequential crashes, one per gate.
-- **check-config-sync.sh** — asserts `aegra.json`, `aegra.aws.json` and
-  `langgraph.json` register the same graph set (a drift here silently
-  breaks one target — it caused a 35-check parity failure once).
+- **test-v2-stream.sh** — Agent Protocol v2 thread-scoped stream (8 checks).
+  Opens `POST /threads/{id}/stream/events` before the run exists, starts the
+  run via `POST /threads/{id}/commands` → `run.start`, asserts envelopes
+  (`id:` seq + `method`), lifecycle running→completed, payload channels,
+  and `since=<seq>` replay. Retries the cycle up to 3× because the v2
+  session attaches via a run-lister poll (an instant graph can finish
+  between polls).
+- **test-multitenancy.sh** — optional multi-key isolation (9 checks).
+  SKIPs cleanly unless `PLATFORM_API_KEYS` is set.
+- **rotate-webhook-secret.sh** — zero-downtime secret rotation: generates a
+  new secret, opens the rotation window in `.env`, prints the AWS steps.
+- **check-config-sync.sh** — asserts **all four** config files register the
+  same graph set (a drift here silently breaks one target — it caused a
+  35-check parity failure once).
 - **aws-restart-tasks.sh** — the AWS crash hook: stops all tasks via the
   ECS API and nudges the reconciler (never `docker restart`).
 - **upgrade-check.sh** — the gate: rebuild (`docker compose build server`)
@@ -223,3 +244,7 @@ For real AWS, omit these three.
    `official` profile must also stay green.
 5. Never commit secrets: `.env` is gitignored (OpenRouter key lives there);
    AWS secrets go in Secrets Manager.
+6. Touching run claiming? There are **two** claim paths — the reaper
+   (`lease_reaper._find_recoverable`) and the Redis-outage fallback
+   (`WorkerExecutor._poll_postgres`). Any predicate (e.g. `_not_before` for
+   `after_seconds`) must be applied to both.

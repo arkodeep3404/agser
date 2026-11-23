@@ -82,6 +82,55 @@ then read the thread: status must still be `interrupted`, `side_effects`
 must still be exactly `[intake, enrich]`, `stage_results` intact. Resume →
 `execute` runs once → gate 3 → `report` runs once.
 
+### Delayed runs (`after_seconds`)
+
+```bash
+curl -s -X POST $BASE/threads/$TID/runs -H "x-api-key: $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"assistant_id":"ping","input":{"messages":[{"role":"user","content":"later"}]},
+       "after_seconds":60}'
+```
+
+The run is created `pending` with a `_not_before` timestamp and is **not**
+submitted; the lease reaper enqueues it once due (granularity ≈ the reaper
+interval, ~15s). Both claim paths honour it — the reaper and the
+Redis-outage fallback (`WorkerExecutor._poll_postgres`).
+
+### Webhook secret rotation (zero downtime)
+
+```bash
+./scripts/rotate-webhook-secret.sh      # writes new + previous into .env
+docker compose up -d --force-recreate server
+# deliveries now carry X-Agser-Signature AND X-Agser-Signature-Previous
+# migrate receivers at your own pace, then remove AGSER_WEBHOOK_SECRET_PREVIOUS
+```
+
+Verified: a receiver that knows **only** the old secret still validates the
+delivery via the `-Previous` header.
+
+### Optional multi-key isolation (tenant-style)
+
+```bash
+PLATFORM_API_KEYS="keyA:alice,keyB:bob" docker compose up -d --force-recreate server
+KEY_A=keyA KEY_B=keyB ./scripts/test-multitenancy.sh
+```
+
+Each key is its own identity; the core scopes every resource by `user_id`,
+so identities cannot read, search, run on, or delete each other's threads.
+Unset → single shared identity (the default for internal use).
+
+### v2 protocol stream
+
+```bash
+./scripts/test-v2-stream.sh                 # ours
+BASE=http://127.0.0.1:8124 ./scripts/test-v2-stream.sh   # official parity
+```
+
+Remember: payload channels (`values`, `messages`) are produced for runs
+started the v2-native way (`POST /threads/{id}/commands` → `run.start`).
+Runs started via the v1 `POST /runs` only surface `lifecycle` on the v2
+stream.
+
 ### Chaos drill on the emulator (the flagship test)
 ```bash
 # start a sleepy run via the ALB, wait 12s (prep checkpointed),
@@ -125,6 +174,12 @@ BLPOP workers steal the other's `aegra:jobs` entries and can't claim them
 (compose /0, FloCI ECS /1) — and kill **orphan ECS task containers** left
 by FloCI stack destroys (`docker ps | grep floci-ecs`; verify each one's
 `REDIS_URL` db matches the CURRENT deploy).
+
+### Semantic store fails on the emulator ("extension vector is not available")
+FloCI's RDS image has no `pgvector`. Deploy the emulator with the config
+that omits the store index:
+`-c agser:configFile=aegra.aws.emulator.json`. Real AWS keeps
+`aegra.aws.json` (index on, Bedrock embeddings).
 
 ### ECS tasks run a stale image after you push `:latest`
 FloCI caches images by reference. Push an **immutable tag** and redeploy

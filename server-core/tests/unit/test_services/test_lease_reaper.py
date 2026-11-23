@@ -562,3 +562,53 @@ class TestRecoverCrashedRunsWebhook:
         mock_report = await self._recover([("run-1", "thread-1", "user-1", params, "assistant-1", _CREATED_AT)])
 
         mock_report.assert_not_called()
+
+
+class TestFindRecoverableDelayedRuns:
+    """Runs created with ``after_seconds`` wait for their due time before a worker sees them."""
+
+    @pytest.mark.asyncio
+    async def test_future_delayed_run_is_not_selected_but_a_due_one_is(self) -> None:
+        """Only a due ``_not_before`` offers the run to the reaper.
+
+        A pending run carrying a future ``_not_before`` matches neither branch of
+        the stuck-pending predicate — it has the key (so branch (a), which is
+        guarded by ``_not_before IS NULL``, skips it) and its due time is still
+        ahead of now (so branch (b) skips it) — and is therefore never
+        re-enqueued early. Once the due time has passed, branch (b) selects it.
+        Branch (a) keeps covering every run without the key, since a SQL NULL
+        comparison in (b) is never true.
+        """
+        session = AsyncMock()
+        crashed_result = MagicMock()
+        crashed_result.fetchall.return_value = []
+        stuck_result = MagicMock()
+        stuck_result.fetchall.return_value = []
+        session.execute = AsyncMock(side_effect=[crashed_result, stuck_result])
+        maker = _make_session_maker(session)
+
+        now_epoch = 1_800_000_000.0
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.time.time", return_value=now_epoch),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+        ):
+            mock_settings.worker.STUCK_PENDING_THRESHOLD_SECONDS = 120
+            await LeaseReaper._find_recoverable()
+
+        stuck_statement = session.execute.await_args_list[1].args[0]
+        compiled = stuck_statement.compile()
+        sql = " ".join(str(compiled).split())
+        rendered = f"{sql} {list(compiled.params.values())}"
+
+        # Both branches are present, joined by OR: (a) is not silently dropped.
+        assert " OR " in sql
+        # (a) still matches runs without the key: NULL due time plus age threshold.
+        assert "IS NULL" in sql
+        assert "runs.created_at <" in sql
+        # (b) compares the persisted due time against now, so a future one is excluded.
+        assert "runs.execution_params" in sql
+        assert "AS FLOAT" in sql
+        assert "<=" in sql
+        assert "_not_before" in rendered
+        assert str(now_epoch) in rendered

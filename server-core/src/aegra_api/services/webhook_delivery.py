@@ -247,10 +247,21 @@ class WebhookDispatcher:
             # agser (ours): HMAC-SHA256 request signing when AGSER_WEBHOOK_SECRET
             # is configured — receivers verify with
             #   hmac_sha256(secret, raw_body) == header["X-Agser-Signature"][7:]
+            #
+            # Secret rotation: during the rotation window set
+            # AGSER_WEBHOOK_SECRET to the NEW secret and
+            # AGSER_WEBHOOK_SECRET_PREVIOUS to the old one. Deliveries then
+            # carry BOTH signatures, so receivers still on the old secret keep
+            # verifying successfully. Drop the _PREVIOUS variable once every
+            # receiver has switched. See scripts/rotate-webhook-secret.sh.
             _secret = os.environ.get("AGSER_WEBHOOK_SECRET")
             if _secret:
                 _sig = hmac.new(_secret.encode(), body, hashlib.sha256).hexdigest()
                 headers["X-Agser-Signature"] = f"sha256={_sig}"
+                _prev = os.environ.get("AGSER_WEBHOOK_SECRET_PREVIOUS")
+                if _prev:
+                    _prev_sig = hmac.new(_prev.encode(), body, hashlib.sha256).hexdigest()
+                    headers["X-Agser-Signature-Previous"] = f"sha256={_prev_sig}"
             attempts = await self._post(url, body, headers)
         except (httpx.HTTPError, WebhookResponseError, WebhookDNSError, TimeoutError) as exc:
             error = str(exc) or type(exc).__name__
@@ -594,10 +605,21 @@ class WebhookDispatcher:
             # agser (ours): HMAC-SHA256 request signing when AGSER_WEBHOOK_SECRET
             # is configured — receivers verify with
             #   hmac_sha256(secret, raw_body) == header["X-Agser-Signature"][7:]
+            #
+            # Secret rotation: during the rotation window set
+            # AGSER_WEBHOOK_SECRET to the NEW secret and
+            # AGSER_WEBHOOK_SECRET_PREVIOUS to the old one. Deliveries then
+            # carry BOTH signatures, so receivers still on the old secret keep
+            # verifying successfully. Drop the _PREVIOUS variable once every
+            # receiver has switched. See scripts/rotate-webhook-secret.sh.
             _secret = os.environ.get("AGSER_WEBHOOK_SECRET")
             if _secret:
                 _sig = hmac.new(_secret.encode(), body, hashlib.sha256).hexdigest()
                 headers["X-Agser-Signature"] = f"sha256={_sig}"
+                _prev = os.environ.get("AGSER_WEBHOOK_SECRET_PREVIOUS")
+                if _prev:
+                    _prev_sig = hmac.new(_prev.encode(), body, hashlib.sha256).hexdigest()
+                    headers["X-Agser-Signature-Previous"] = f"sha256={_prev_sig}"
             attempts = await self._post(url, body, headers)
         except (httpx.HTTPError, WebhookResponseError, WebhookDNSError, TimeoutError) as exc:
             error = str(exc) or type(exc).__name__

@@ -80,6 +80,10 @@ export class PlatformStack extends cdk.Stack {
     const redisOverride = ctx('redisUri', '') as string;
     // OTLP trace export endpoint (Langfuse/Phoenix), or unset for off.
     const otelEndpoint = ctx('otelEndpoint', '') as string;
+    // Which config file the task loads. Real AWS default keeps the semantic
+    // store index (RDS supports pgvector). The FloCI emulator's RDS has no
+    // pgvector, so emulator deploys pass aegra.aws.emulator.json.
+    const configFile = ctx('configFile', 'aegra.aws.json') as string;
 
     // ---------------------------------------------------------------- VPC
     // One NAT per AZ: outbound traffic (model calls) survives an AZ failure.
@@ -300,7 +304,7 @@ export class PlatformStack extends cdk.Stack {
       }),
       environment: {
         // Our owned server core (server-core/): aegra-api configuration.
-        AEGRA_CONFIG: 'aegra.aws.json',
+        AEGRA_CONFIG: configFile,
         REDIS_BROKER_ENABLED: 'true',
         REDIS_URL: redisOverride || `redis://${redis.attrPrimaryEndPointAddress}:${redis.attrPrimaryEndPointPort}`,
         WORKER_COUNT: '3',

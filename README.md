@@ -137,9 +137,10 @@ This is the platform's core promise, and it is instrumented rather than asserted
 - **Assistants**: create/get/update/delete, search, count, schemas, graph, subgraphs, **versioning + rollback**, full-replace updates.
 - **Threads**: create (metadata, caller-chosen UUID, `if_not_exists`), get, patch, search+sort, count, delete, copy, prune.
 - **State**: get, state-at-checkpoint, history (POST), update state (`as_node`), fork/time-travel from any checkpoint.
-- **Runs**: wait / background / stream / stateless / batch; join; cancel (`interrupt`); list/get/delete.
+- **Runs**: wait / background / stream / stateless / batch; join; cancel (`interrupt`); list/get/delete; **`after_seconds`** delayed start (honoured by both claim paths).
 - **Double-texting**: `enqueue` (default), `reject` → 409, `interrupt`, `rollback` — enforced server-side.
 - **Streaming**: `values`, `updates`, `messages-tuple`, `custom`, multiple modes at once, `stream_subgraphs`, join-stream, resumable streams (`Last-Event-ID`), cross-replica relay.
+- **Agent Protocol v2**: thread-scoped event stream (`POST /threads/{id}/stream/events`) with channel filters, `id:` seq envelopes, `since=` replay, and `run.start` commands (`POST /threads/{id}/commands`).
 - **Human-in-the-loop**: `interrupt()` pause, pending payload in state, resume via `Command`, static breakpoints (`interrupt_before/after`), state surgery before resume, zero-compute waits, survives server restarts.
 - **Store**: put/get/delete/search, namespaces, **semantic search** (pgvector; provider-agnostic embeddings — Bedrock, OpenAI, or an offline fake server for CI).
 - **Crons**: CRUD + search + count + GET-by-id, thread-bound and stateless, UTC 5-field, official semantics (create never auto-fires a run).
@@ -152,14 +153,15 @@ This is the platform's core promise, and it is instrumented rather than asserted
 | `POST /threads/count` | official count-by-filter |
 | `POST /runs/batch` | official batch create |
 | `POST /threads/{id}/copy` | thread copy incl. latest checkpoint |
-| `POST /mcp` | **MCP** Streamable HTTP — `initialize`, `tools/list`, `tools/call`; one tool per graph with its real input schema |
+| `POST /mcp` | **MCP** Streamable HTTP — `initialize`, `tools/list`, `tools/call`; one tool per graph with its real input schema. **HITL round-trip** via reserved `_thread_id` / `_resume` arguments: an interrupted call returns the interrupt payload plus a `resume_hint` |
 | `GET /.well-known/agent-card.json` | **A2A** agent card |
 | `POST /a2a/{assistant_id}` | **A2A** `message/send` |
 
 ### Auth, security, webhooks
 - Platform API-key auth (`x-api-key` or `Authorization: Bearer`), constant-time compare, hard-fail if unset.
+- **Optional multi-key isolation** (`PLATFORM_API_KEYS=key:identity`): each key is its own identity, fully isolated by the core's `user_id` scoping. Off by default.
 - Per-resource authorization map in the core (resource × action).
-- Webhook delivery with SSRF policy (domain allowlist, loopback/private-IP blocking) **and HMAC-SHA256 signing** (`X-Agser-Signature`), with retries and backoff.
+- Webhook delivery with SSRF policy (domain allowlist, loopback/private-IP blocking), **HMAC-SHA256 signing** (`X-Agser-Signature`), retries with backoff, and **zero-downtime secret rotation** (dual signature via `X-Agser-Signature-Previous`).
 - Secrets via AWS Secrets Manager; `.env` gitignored.
 
 ### Observability
@@ -186,7 +188,9 @@ Every row below is re-runnable from this repository. Current status:
 | Failure injection | `./scripts/test-failures.sh` | server killed mid-run → reaper → checkpoint resume; client network drop → run survives → stream rejoins; cancel; 4-way parallel — all asserting exactly-once | **PASS** |
 | HITL lifecycle | `./scripts/test-hitl.sh` | ~30 checks: pause, approve, reject, restart survival, state surgery, double-resume, delete-during-pause, cancel-then-interrupt, fork-to-gate, complex-agent approve+reject with zero duplicate tool calls | **29/29 ours · 22/22 official** |
 | Multi-gate crash-recovery | `./scripts/test-workflow.sh` | **46 checks**: 3 sequential approval gates + 4 instrumented stages; crash-while-paused-at-gate-2, crash mid-stage, 3 sequential crashes, reject-at-each-gate, state surgery, fork | **46/46 local · 46/46 official · 46/46 AWS** |
-| Upgrade gate | `./scripts/upgrade-check.sh` | rebuild with fresh deps + all six suites | **GREEN** |
+| Agent Protocol v2 stream | `./scripts/test-v2-stream.sh` | 8 checks: thread-scoped SSE opened before the run, v2-native `run.start`, envelopes + `id:` seq, lifecycle running→completed, payload channels, `since=` replay | **8/8 ours · 8/8 official** |
+| Multi-key isolation | `./scripts/test-multitenancy.sh` | 9 checks: two identities, cross-tenant read/search/run/delete denied, unknown key 401 (SKIPs when unconfigured) | **9/9 in multi-key mode** |
+| Upgrade gate | `./scripts/upgrade-check.sh` | rebuild with fresh deps + functional readiness probe + all eight suites | **GREEN** |
 
 Additionally verified (not in the gate): **AWS kill-task** (`ecs stop-task` mid-run → reaper → resume → exactly once), **full emulator crash** (see above), **AES ciphertext at rest** (encrypted blob markers in Postgres, zero plaintext), **MCP** tools/list + tools/call, **A2A** message round-trip, **webhook HMAC** signature validity, **Langfuse** ingestion.
 
@@ -337,8 +341,10 @@ POST   /a2a/{assistant_id}
 | Variable | Default | Purpose |
 |---|---|---|
 | `PLATFORM_API_KEY` | `dev-key` (local) | shared API key clients send; server 500s if unset |
+| `PLATFORM_API_KEYS` | — | optional `key:identity,key:identity` → isolated identities (tenant-style) |
 | `LANGGRAPH_AES_KEY` | dev key (local) | 16/24/32-byte key → AES-256-GCM checkpoint encryption at rest |
 | `AGSER_WEBHOOK_SECRET` | — | enables `X-Agser-Signature` HMAC-SHA256 on webhooks |
+| `AGSER_WEBHOOK_SECRET_PREVIOUS` | — | rotation window: also sends `X-Agser-Signature-Previous` |
 
 ### Datastores
 | Variable | Purpose |
@@ -391,7 +397,7 @@ BASE=http://<AlbDns> PLATFORM_API_KEY=$(aws secretsmanager get-secret-value \
   --secret-id agser/platform-api-key --query SecretString --output text) ./scripts/verify.sh
 ```
 
-Useful CDK context flags: `certificateArn`, `allowedCidrs`, `alertEmail`, `modelProvider`, `agentModel`, `bedrockModelId`, `otelEndpoint`, sizing (`desiredCount`, `cpu`, `memoryMiB`, `dbInstanceClass`, `dbMultiAz`, `redisNodeType`, `maxCapacity`), and `agser:cicd` for the native pipeline.
+Useful CDK context flags: `certificateArn`, `allowedCidrs`, `alertEmail`, `modelProvider`, `agentModel`, `bedrockModelId`, `otelEndpoint`, `configFile` (default `aegra.aws.json` — with the semantic store index on Bedrock embeddings), sizing (`desiredCount`, `cpu`, `memoryMiB`, `dbInstanceClass`, `dbMultiAz`, `redisNodeType`, `maxCapacity`), and `agser:cicd` for the native pipeline.
 
 ### Local AWS emulator (FloCI)
 
@@ -492,12 +498,26 @@ docs/                     ARCHITECTURE · DEVELOPER-GUIDE · RUNBOOK · HANDOFF 
 
 ## Known limitations & queued work
 
-- **Semantic store index** is disabled in `aegra.aws.json` because the local AWS emulator's RDS has no `pgvector`; re-add `store.index` (with `bedrock:` embeddings) when deploying to real RDS.
-- **MCP elicitation** for interrupts is not implemented — an interrupted MCP tool call returns the thread id so the client resumes over REST.
-- **`after_seconds`** (delayed runs) is not implemented.
-- **Multi-tenancy** is intentionally out of scope (single-company internal use); the authorization map exists if it is ever needed.
-- **Real-AWS live-fire** (autoscaling, Multi-AZ failover) still needs to be exercised in an actual account.
-- v2 thread-stream end-to-end client test and webhook secret rotation are pending.
+**Everything that can be built and tested locally is built and tested.** The
+only open items are blocked on credentials or hardware:
+
+- **Real-AWS live-fire** — autoscaling (CPU + requests + backlog step
+  scaling) and RDS Multi-AZ failover are wired and synth-verified, but need
+  to be exercised in an actual AWS account (`aws login` + `cdk deploy`).
+- **LangSmith licensed-image parity** — the same suites are ready to run
+  against the licensed production image once a key is available.
+
+Design notes worth knowing:
+
+- The emulator config (`aegra.aws.emulator.json`) omits the semantic store
+  index because FloCI's RDS has no `pgvector`. Real AWS uses
+  `aegra.aws.json` with the index on (Bedrock Titan embeddings).
+- MCP interrupts use an explicit `_resume` argument rather than the MCP
+  elicitation primitive: the endpoint is stateless Streamable HTTP, so the
+  server cannot initiate a request to the client. The round-trip is complete
+  — interrupt payload, `resume_hint`, and resume — just client-initiated.
+- Multi-tenancy is **optional and off by default** (single-company use). Set
+  `PLATFORM_API_KEYS` to enable per-key isolation.
 
 ---
 

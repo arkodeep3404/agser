@@ -1,5 +1,6 @@
 """Run-related Pydantic models for Agent Protocol"""
 
+import math
 import re
 from datetime import datetime
 from typing import Any, Literal, Self
@@ -73,6 +74,16 @@ class RunCreate(BaseModel):
         description="Behavior after stateless run completes: 'delete' (default) removes the ephemeral thread, 'keep' preserves it.",
     )
 
+    # agser (ours): official delayed runs. The run row is created as pending but
+    # is not handed to a worker until the delay elapses (see the lease reaper).
+    after_seconds: float | None = Field(
+        None,
+        description=(
+            "Delay the run start by this many seconds. The run is created with status 'pending' and is only "
+            "picked up by a worker once the delay has elapsed; 0 (or absent) starts it immediately."
+        ),
+    )
+
     multitask_strategy: str | None = Field(
         None,
         description="Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'.",
@@ -125,6 +136,18 @@ class RunCreate(BaseModel):
             "sub-agent type) rather than payload data."
         ),
     )
+
+    @field_validator("after_seconds", mode="after")
+    @classmethod
+    def validate_after_seconds(cls, after_seconds: float | None) -> float | None:
+        """A negative delay has no due time; a non-finite one has no JSONB representation."""
+        if after_seconds is None:
+            return None
+        if after_seconds < 0:
+            raise ValueError(f"after_seconds must be >= 0, got {after_seconds}")
+        if not math.isfinite(after_seconds):
+            raise ValueError(f"after_seconds must be a finite number of seconds, got {after_seconds}")
+        return after_seconds
 
     @field_validator("metadata", mode="after")
     @classmethod

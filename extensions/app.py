@@ -233,9 +233,16 @@ async def copy_thread(
 # ===========================================================================
 # agser (ours): MCP endpoint — official Agent Server contract.
 # Streamable HTTP, stateless, POST-only, JSON responses. Every graph becomes
-# an MCP tool; input schema from the graph. Interrupts are surfaced as
-# isError=false payloads with the thread id so the client can resume via the
-# REST API (full MCP elicitation is queued work).
+# an MCP tool; input schema from the graph. A paused (human-in-the-loop) run
+# returns isError=false with the FULL pending interrupt values plus the exact
+# tools/call arguments that resume it, and resuming happens over MCP itself via
+# the two reserved arguments below — no REST round-trip needed.
+#
+# tools/call reserved arguments (stripped before the graph sees them):
+#   _thread_id  string    run on an existing thread instead of creating one
+#   _resume     any JSON  resume payload for a paused thread; creates the run
+#                         with command={"resume": <value>} and no input (the
+#                         graph resumes from its checkpoint)
 # ===========================================================================
 import asyncio
 import time as _time
@@ -246,6 +253,11 @@ from aegra_api.services.langgraph_service import get_langgraph_service
 
 MCP_PROTOCOL = "2025-03-26"
 MCP_WAIT_SECS = int(os.environ.get("AGSER_MCP_WAIT_SECS", "120"))
+
+# MCP-level control keys — never graph input.
+MCP_RESERVED_ARGS = ("_thread_id", "_resume")
+
+_MISSING = object()
 
 
 def _rpc(id_, result=None, error=None):
@@ -293,6 +305,188 @@ async def _wait_run(session, run_id: str, wait_secs: int):
     return None
 
 
+def _as_list(value) -> list:
+    """Normalize an interrupt container (tuple / list / single) to a list."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _interrupt_value(entry):
+    """The ``value`` of one interrupt, in whatever form the source handed us.
+
+    Three shapes occur: live ``Interrupt`` objects (raw checkpointer writes),
+    serialized ``{"value": ..., "id": ...}`` dicts (the REST/serializer path),
+    and already-unwrapped values.
+    """
+    if isinstance(entry, dict):
+        return entry["value"] if "value" in entry else entry
+    value = getattr(entry, "value", _MISSING)
+    return entry if value is _MISSING else value
+
+
+def _interrupt_values_from_thread_state(state) -> list:
+    """``tasks[].interrupts[].value`` — the REST /threads/{id}/state shape."""
+    values: list = []
+    for task in getattr(state, "tasks", None) or []:
+        if isinstance(task, dict):
+            values.extend(_interrupt_value(i) for i in _as_list(task.get("interrupts")))
+    if not values:
+        values.extend(
+            _interrupt_value(i) for i in _as_list(getattr(state, "interrupts", None))
+        )
+    return values
+
+
+async def _interrupt_values_from_checkpoint(thread_id: str) -> list:
+    """Raw checkpointer fallback: the ``__interrupt__`` pending writes on the
+    latest checkpoint — exactly what ``aget_state`` projects into
+    ``snapshot.tasks[].interrupts``."""
+    try:
+        checkpointer = db_manager.get_checkpointer()
+        tup = await checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:  # noqa: BLE001 — interrupt read is best-effort
+        return []
+    if tup is None:
+        return []
+    values: list = []
+    for write in getattr(tup, "pending_writes", None) or []:
+        try:
+            _task_id, channel, value = write
+        except (TypeError, ValueError):
+            continue
+        if channel == "__interrupt__":
+            values.extend(_interrupt_value(item) for item in _as_list(value))
+    if not values:
+        checkpoint = tup.checkpoint if isinstance(tup.checkpoint, dict) else {}
+        channel_values = checkpoint.get("channel_values") or {}
+        if isinstance(channel_values, dict):
+            values.extend(
+                _interrupt_value(item)
+                for item in _as_list(channel_values.get("__interrupt__"))
+            )
+    return values
+
+
+def _interrupt_values_from_output(output) -> list:
+    """Last resort: the run's stored output, when it carries the interrupt."""
+    if not isinstance(output, dict):
+        return []
+    for payload in (output, output.get("values")):
+        if not isinstance(payload, dict):
+            continue
+        values = [_interrupt_value(i) for i in _as_list(payload.get("__interrupt__"))]
+        values += [_interrupt_value(i) for i in _as_list(payload.get("interrupts"))]
+        if values:
+            return values
+    return []
+
+
+async def _interrupt_values(session, thread_id: str, user: User) -> list:
+    """Pending interrupt values for a thread, read the way REST reads them.
+
+    Preferred route mirrors ``GET /threads/{id}/state``: resolve the thread's
+    graph from its metadata, ``aget_state`` through the langgraph service with
+    ``access_context="threads.read"``, then the shared ``ThreadStateService``
+    conversion (``tasks[].interrupts[].value``). Falls back to the raw
+    checkpointer so a paused run is never invisible to the client.
+    """
+    try:
+        from aegra_api.api.threads import thread_state_service
+        from aegra_api.services.langgraph_service import create_thread_config
+
+        thread = await session.scalar(
+            select(ThreadORM).where(ThreadORM.thread_id == thread_id)
+        )
+        graph_id = ((thread.metadata_json or {}) if thread is not None else {}).get(
+            "graph_id"
+        )
+        if graph_id:
+            config = create_thread_config(thread_id, user)
+            async with get_langgraph_service().get_graph(
+                graph_id, config=config, access_context="threads.read", user=user
+            ) as agent:
+                snapshot = await agent.aget_state(config)
+            if snapshot is not None:
+                values = _interrupt_values_from_thread_state(
+                    thread_state_service.convert_snapshot_to_thread_state(
+                        snapshot, thread_id
+                    )
+                )
+                if values:
+                    return values
+    except Exception:  # noqa: BLE001 — fall through to the checkpointer
+        pass
+    return await _interrupt_values_from_checkpoint(thread_id)
+
+
+def _with_thread(output: dict, thread_id: str, run_id: str) -> dict:
+    """Completed-run payload with the identifiers a client needs to continue.
+
+    The graph output is returned as-is (messages, values, structured_response…)
+    plus `thread_id` and `run_id`, so an MCP client can chain calls with
+    `_thread_id` even when it did not create the thread itself.
+    """
+    payload = dict(output) if isinstance(output, dict) else {"output": output}
+    payload.setdefault("thread_id", thread_id)
+    payload.setdefault("run_id", run_id)
+    return payload
+
+
+def _next_call(tool_name: str, thread_id: str, interrupts: list) -> dict:
+    """The exact tools/call arguments that move this thread forward.
+
+    Two gate shapes exist in this repo and they resume differently:
+      * graph ``interrupt()`` gates (approval / workflow) resume with the
+        decision value itself — ``{"approved": true}``;
+      * deepagents ``interrupt_on`` tool-approval gates carry
+        ``action_requests`` and resume with ``{"decisions": [...]}``, one
+        decision per requested action.
+    """
+    tool_gate = False
+    decisions = 1
+    for value in interrupts:
+        if isinstance(value, dict) and "action_requests" in value:
+            tool_gate = True
+            requests = value.get("action_requests")
+            if isinstance(requests, list):
+                decisions = max(decisions, len(requests))
+    if tool_gate:
+        resume: dict = {"decisions": [{"type": "approve"} for _ in range(decisions)]}
+    else:
+        resume = {"approved": True}
+    if not interrupts:
+        # Nothing pending (e.g. the run was cancelled rather than gated): the
+        # thread is still resumable, just with a normal call on it.
+        return {
+            "name": tool_name,
+            "arguments": {
+                "_thread_id": thread_id,
+                "messages": [{"role": "user", "content": "<next instruction>"}],
+            },
+        }
+    return {"name": tool_name, "arguments": {"_thread_id": thread_id, "_resume": resume}}
+
+
+def _interrupt_payload(tool_name: str, thread_id: str, run_id: str, interrupts: list) -> dict:
+    """MCP result payload for a paused run: full interrupt data + resume call."""
+    payload = {
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "status": "interrupted",
+        "interrupts": interrupts,
+        "resume_hint": json.dumps(_next_call(tool_name, thread_id, interrupts)),
+    }
+    if not interrupts:
+        payload["note"] = (
+            "no pending interrupt found on this thread (the run may have been "
+            "cancelled); continue with a normal call on the same thread"
+        )
+    return payload
+
+
 @app.post("/mcp", tags=["MCP"])
 async def mcp(
     request: dict,
@@ -319,12 +513,59 @@ async def mcp(
         params = request.get("params") or {}
         name = params.get("name", "")
         args = params.get("arguments") or {}
-        input_data = {"messages": args.get("messages") or [{"role": "user", "content": json.dumps(args)}]}
+        if not isinstance(args, dict):
+            return _rpc(
+                rid,
+                error={"code": -32000, "message": "tools/call arguments must be an object"},
+            )
+        thread_arg = args.get("_thread_id")
+        resuming = "_resume" in args
+        graph_args = {k: v for k, v in args.items() if k not in MCP_RESERVED_ARGS}
+        if resuming and not thread_arg:
+            return _rpc(
+                rid,
+                error={
+                    "code": -32000,
+                    "message": (
+                        "_resume requires _thread_id: a resume targets an existing "
+                        "paused thread"
+                    ),
+                },
+            )
         try:
-            thread_id = str(uuid.uuid4())
-            session.add(ThreadORM(thread_id=thread_id, user_id=user.identity))
-            await session.flush()
-            run_req = RunCreate(assistant_id=name, input=input_data)
+            if thread_arg:
+                thread_id = str(thread_arg)
+                exists = await session.scalar(
+                    select(ThreadORM.thread_id).where(ThreadORM.thread_id == thread_id)
+                )
+                if exists is None:
+                    return _rpc(
+                        rid,
+                        error={
+                            "code": -32000,
+                            "message": (
+                                f"Thread '{thread_id}' not found; omit _thread_id to "
+                                "start a new thread"
+                            ),
+                        },
+                    )
+            else:
+                thread_id = str(uuid.uuid4())
+                session.add(ThreadORM(thread_id=thread_id, user_id=user.identity))
+                await session.flush()
+            if resuming:
+                # Resume runs read their input from the checkpoint, and RunCreate
+                # makes `input` and `command` mutually exclusive — so input stays
+                # None and the graph state already holds the conversation.
+                input_data = None
+                command: dict | None = {"resume": args["_resume"]}
+            else:
+                input_data = {
+                    "messages": graph_args.get("messages")
+                    or [{"role": "user", "content": json.dumps(graph_args)}]
+                }
+                command = None
+            run_req = RunCreate(assistant_id=name, input=input_data, command=command)
             run_id, _run, _job = await _prepare_run(
                 session, thread_id, run_req, user, initial_status="pending"
             )
@@ -348,6 +589,11 @@ async def mcp(
                     },
                 )
             if row.status == "interrupted":
+                # Full interrupt payload: read the real checkpoint state the way
+                # GET /threads/{id}/state does, so the client can decide.
+                interrupts = await _interrupt_values(session, thread_id, user)
+                if not interrupts:
+                    interrupts = _interrupt_values_from_output(row.output)
                 return _rpc(
                     rid,
                     {
@@ -355,9 +601,8 @@ async def mcp(
                             {
                                 "type": "text",
                                 "text": json.dumps(
-                                    {"thread_id": thread_id, "status": "interrupted",
-                                     "note": "human approval required; resume via the API"}
-                                )
+                                    _interrupt_payload(name, thread_id, run_id, interrupts)
+                                ),
                             }
                         ],
                         "isError": False,
@@ -374,8 +619,9 @@ async def mcp(
                 {
                     "content": [
                         {"type": "text",
-                         "text": json.dumps(row.output if row.output is not None
-                                            else {"thread_id": thread_id})[:60000]}
+                         "text": json.dumps(_with_thread(
+                             row.output if row.output is not None else {},
+                             thread_id, run_id))[:60000]}
                     ],
                     "isError": False,
                 },

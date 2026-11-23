@@ -114,6 +114,31 @@ exactly `[intake, enrich]`, `stage_results` intact → resumed → each
 remaining stage ran exactly once → completed. Full steps are in
 `docs/RUNBOOK.md` under "Multi-gate HITL crash drill".
 
+## Fourth pass — closing every pending item
+
+Implemented: real-AWS semantic store index (with a separate emulator
+config), MCP interrupt→resume round-trip, `after_seconds` delayed runs,
+webhook secret rotation, the v2 thread-stream e2e suite, and optional
+multi-key isolation. Two new suites joined the gate (now 8).
+
+Design decisions worth knowing:
+
+- **Two AWS configs by design.** `aegra.aws.json` (real AWS, store index on,
+  Bedrock embeddings) and `aegra.aws.emulator.json` (FloCI, no index — its
+  RDS has no pgvector). The CDK flag `agser:configFile` picks one. Do not
+  collapse them; the emulator would fail to boot with the index on.
+- **Multi-key auth is opt-in.** `PLATFORM_API_KEYS` unset → one shared
+  identity (the company default). Set → one identity per key, and the core's
+  existing `user_id` scoping gives real isolation with no schema change.
+- **`after_seconds` uses the reaper, not a new scheduler.** The run row is
+  `pending` with `_not_before` in `execution_params`; the reaper enqueues it
+  when due. Both claim paths must honour the predicate — that was a real bug
+  (the Redis-outage fallback ignored it) and is now fixed and documented.
+- **Webhook rotation is dual-signature.** The server signs with the current
+  secret and, during the window, also with the previous one; receivers
+  accept either header against either known secret. This is what makes
+  rotation zero-downtime for consumers you don't control.
+
 ## Where the next agent should start
 
 1. `AGENTS.md` §8 queued work (real-AWS deploy, LangSmith license parity

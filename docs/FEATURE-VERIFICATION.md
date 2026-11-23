@@ -269,3 +269,37 @@ Bugs found and fixed during this pass:
 4. FloCI serves cached images by reference and does not auto-reconcile after
    a cold restart → documented immutable-tag deploys + the
    `aws-restart-tasks.sh` crash hook.
+
+
+## Fourth verification pass — all remaining items closed
+
+Every item that was previously listed as pending has been implemented and
+tested, except what genuinely requires an AWS account or is a product
+decision.
+
+| Item | Status | Evidence |
+|---|---|---|
+| Semantic store index for real AWS | **DONE** | `aegra.aws.json` carries `store.index` with `bedrock:amazon.titan-embed-text-v2:0`; a separate `aegra.aws.emulator.json` (no index) serves FloCI, selected by `-c agser:configFile=`. `check-config-sync.sh` now covers all four configs |
+| MCP interrupt → resume | **DONE** | reserved `_thread_id` / `_resume` arguments; interrupted calls return the real interrupt payload + `thread_id` + `run_id` + `resume_hint`; resume over MCP completed a gated run with `prep` executed exactly once; completed payloads always include `thread_id`/`run_id` |
+| `after_seconds` delayed runs | **DONE** | run created `pending`, still pending at 8s, `success` after the due time; honoured by **both** claim paths (reaper + `_poll_postgres` Redis-outage fallback) |
+| Webhook secret rotation | **DONE** | dual signature (`X-Agser-Signature` + `-Previous`); verified a receiver that knows only the OLD secret still validates |
+| v2 thread-stream e2e | **DONE** | `scripts/test-v2-stream.sh` 8/8 on ours **and** official: envelopes with `id:` seq, lifecycle running→completed, payload channels, `since=` replay |
+| Multi-tenancy | **DONE (optional, off by default)** | `PLATFORM_API_KEYS=key:identity` → isolated identities; 9/9 isolation checks (read/search/run/delete all denied cross-tenant) |
+| Real-AWS live-fire | **BLOCKED** | needs `aws login`; autoscaling/failover wiring is deployed and synth-verified, the account is the only missing piece |
+
+Final gate: **8 suites GREEN** (config-sync, verify, features, failures,
+HITL, workflow, v2-stream, multi-tenancy).
+
+Parity against the official build: **features 63/63, HITL 22/22,
+workflow 46/46, v2-stream 8/8.**
+
+Bugs found and fixed in this pass:
+1. `WorkerExecutor._poll_postgres` ignored `_not_before` — during a Redis
+   outage a delayed run could start early. Fixed (both claim paths now
+   honour it).
+2. The gate ran suites before the embeddings path was warm (liveness ≠
+   readiness) → added a functional-readiness probe (a real store write).
+3. The v2 stream test raced the v2 session's run-lister poll on a warm
+   stack → bounded retry, and the test now starts runs the v2-native way.
+4. `W4.7` sampled interrupt state once after a restart → now polls.
+5. MCP completed payloads omitted `thread_id` → always included.

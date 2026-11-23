@@ -34,6 +34,12 @@ jobs:
       - name: Multi-gate HITL crash-recovery (test-workflow.sh)
         run: ./scripts/test-workflow.sh
 
+      - name: Agent Protocol v2 event stream (test-v2-stream.sh)
+        run: ./scripts/test-v2-stream.sh
+
+      - name: Multi-key isolation (skips when not configured)
+        run: ./scripts/test-multitenancy.sh
+
       - name: Official-contract feature conformance (test-features.sh)
         run: ./scripts/test-features.sh
 

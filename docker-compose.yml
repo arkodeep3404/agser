@@ -72,9 +72,15 @@ services:
       N_JOBS_PER_WORKER: "10"
       RUN_MIGRATIONS_ON_STARTUP: "true"
       PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
+      # Optional multi-key mode: key:identity pairs → isolated identities.
+      # Leave empty for single-company shared access.
+      PLATFORM_API_KEYS: ${PLATFORM_API_KEYS:-}
       # AES-256-GCM checkpoint encryption at rest (official contract).
       LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-0123456789abcdef0123456789abcdef}
       AGSER_WEBHOOK_SECRET: ${AGSER_WEBHOOK_SECRET:-test-webhook-secret}
+      # Rotation window: old secret still accepted in deliveries
+      # (see scripts/rotate-webhook-secret.sh).
+      AGSER_WEBHOOK_SECRET_PREVIOUS: ${AGSER_WEBHOOK_SECRET_PREVIOUS:-}
       # Tracing → self-hosted Langfuse (OTEL_TARGETS=LANGFUSE). Point
       # LANGFUSE_BASE_URL at your AWS Langfuse deployment in production.
       OTEL_TARGETS: ${OTEL_TARGETS:-LANGFUSE}
@@ -117,8 +123,14 @@ services:
       LANGSMITH_TRACING: "false"
       N_JOBS_PER_WORKER: "10"
       PLATFORM_API_KEY: ${PLATFORM_API_KEY:-dev-key}
+      # Optional multi-key mode: key:identity pairs → isolated identities.
+      # Leave empty for single-company shared access.
+      PLATFORM_API_KEYS: ${PLATFORM_API_KEYS:-}
       LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-0123456789abcdef0123456789abcdef}
       AGSER_WEBHOOK_SECRET: ${AGSER_WEBHOOK_SECRET:-test-webhook-secret}
+      # Rotation window: old secret still accepted in deliveries
+      # (see scripts/rotate-webhook-secret.sh).
+      AGSER_WEBHOOK_SECRET_PREVIOUS: ${AGSER_WEBHOOK_SECRET_PREVIOUS:-}
       # Tracing → self-hosted Langfuse (OTEL_TARGETS=LANGFUSE). Point
       # LANGFUSE_BASE_URL at your AWS Langfuse deployment in production.
       OTEL_TARGETS: ${OTEL_TARGETS:-LANGFUSE}

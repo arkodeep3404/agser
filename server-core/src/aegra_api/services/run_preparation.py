@@ -5,6 +5,7 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from functools import cache
 from typing import Any
@@ -290,6 +291,10 @@ async def _prepare_run(
     ``(run_id, run_model, job)``. Cron fires pass ``validate_webhook=False``:
     their webhook passed at cron create/update and is re-checked before each call,
     so a later policy change skips the call instead of blocking the run.
+
+    A run created with ``after_seconds`` is persisted as pending with its due
+    time in ``execution_params['_not_before']`` and is *not* submitted here: the
+    lease reaper submits it once that time has passed.
     """
     if validate_webhook:
         await ensure_webhook_allowed(request.webhook)
@@ -414,6 +419,14 @@ async def _prepare_run(
     # The correlation_id from the HTTP request is stored so workers can
     # link their logs and spans back to the original request.
     exec_params = job.to_execution_params()
+    # agser (ours): official delayed runs. Store the due time on the row before
+    # it is inserted and skip executor.submit below: the lease reaper hands the
+    # run to a worker once _not_before has passed, so a waiting run is never
+    # mistaken for a stuck pending one.
+    not_before: float | None = None
+    if request.after_seconds:
+        not_before = time.time() + request.after_seconds
+        exec_params["_not_before"] = not_before
     exec_params["trace"] = {
         "correlation_id": correlation_id.get(""),
         "user_id": user.identity,
@@ -441,8 +454,11 @@ async def _prepare_run(
 
     run = Run.model_validate(run_orm)
 
-    # Submit to executor
-    await executor.submit(job)
-    logger.info("Submitted run to executor", run_id=run_id)
+    # Submit to executor, unless the run is delayed until _not_before.
+    if not_before is None:
+        await executor.submit(job)
+        logger.info("Submitted run to executor", run_id=run_id)
+    else:
+        logger.info("Run scheduled", run_id=run_id, not_before=not_before)
 
     return run_id, run, job

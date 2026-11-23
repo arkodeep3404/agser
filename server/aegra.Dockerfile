@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir ./server-core \
     'cryptography>=42' \
     'boto3>=1.34'
 
-COPY aegra.json aegra.aws.json auth.py ./
+COPY aegra.json aegra.aws.json aegra.aws.emulator.json auth.py ./
 COPY agents/ ./agents/
 COPY extensions/ ./extensions/
 

@@ -13,17 +13,22 @@ def graphs(path):
     cfg = json.load(open(path))
     return set(cfg.get("graphs", {}))
 
-local = graphs("aegra.json")
-aws = graphs("aegra.aws.json")
-official = graphs("langgraph.json")
+base = graphs("aegra.json")
+others = {
+    "aegra.aws.json": graphs("aegra.aws.json"),
+    "aegra.aws.emulator.json": graphs("aegra.aws.emulator.json"),
+    "langgraph.json": graphs("langgraph.json"),
+}
+local = base
+official = others["langgraph.json"]
 
 ok = True
-for name, a, b in (("local vs aws", local, aws), ("local vs official", local, official)):
+for name, a, b in [("local vs " + k, base, v) for k, v in others.items()]:
     if a != b:
         ok = False
         print(f"MISMATCH {name}: only-in-first={sorted(a - b)} only-in-second={sorted(b - a)}")
 
 if ok:
-    print(f"config sync OK — {len(local)} graphs registered in all three: {sorted(local)}")
+    print(f"config sync OK — {len(local)} graphs registered in all four configs: {sorted(local)}")
 sys.exit(0 if ok else 1)
 PY
